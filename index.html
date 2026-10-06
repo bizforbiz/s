@@ -833,7 +833,10 @@
     // 안 되면(큰 파일 바이러스 검사 안내 페이지 등) 공유 서버 vFile로 폴백. 3개씩 동시에.
     var doneCount = 0;
     var fetchDirect = function (it) {
-      var url = 'https://drive.usercontent.google.com/download?id=' + encodeURIComponent(it.fileId) + '&export=download&confirm=t';
+      // 이미지: lh3 '=d'는 원본 바이트 그대로 + CORS 허용(실측). 그 외 파일: Drive 다운로드 서버.
+      var url = it.kind === 'image'
+        ? 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(it.fileId) + '=d'
+        : 'https://drive.usercontent.google.com/download?id=' + encodeURIComponent(it.fileId) + '&export=download';
       return fetch(url, { credentials: 'omit', cache: 'no-store' }).then(function (res) {
         var ct = (res.headers.get('Content-Type') || '').toLowerCase();
         if (!res.ok || ct.indexOf('text/html') >= 0) throw new Error('direct ' + res.status);
