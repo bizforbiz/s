@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<!-- Stash 공유 뷰어 (정적 페이지). 데이터는 전부 Apps Script API에서 받는다 — 이 파일에는 비밀값·공유 내용이 없다. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src https: data: blob:; connect-src https://script.google.com https://*.googleusercontent.com https://drive.usercontent.google.com; base-uri 'none'; form-action 'none'">
+<!-- Stash 공유 뷰어 (정적 페이지). 데이터는 Drive의 공개 매니페스트(m.json, v2) 또는 Apps Script API(옛 링크)에서 받는다 — 이 파일에는 공유 내용이 없다. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src https: data: blob:; connect-src https://script.google.com https://*.googleusercontent.com https://drive.usercontent.google.com https://www.googleapis.com; base-uri 'none'; form-action 'none'">
 <title>Stash 공유</title>
 <meta property="og:title" content="Stash 공유">
 <meta property="og:description" content="받은 링크로 사진과 메모를 봅니다.">
@@ -112,6 +112,8 @@
   .item {
     display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 24px;
     padding: 26px 0; border-top: 1px solid var(--line); scroll-margin-top: 12px;
+    /* 화면 밖 상세는 그리기 생략(항목 수백 개여도 스크롤이 가볍게). 한 번 그려진 높이는 기억(auto) */
+    content-visibility: auto; contain-intrinsic-size: auto 640px;
   }
   .item.solo { grid-template-columns: minmax(0, 1fr); }
   .item .media { display: flex; flex-direction: column; align-items: center; }
@@ -138,6 +140,21 @@
   .memo.empty { color: var(--muted); font-style: normal; }
   .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
   .links .src { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .links.center { justify-content: center; margin-top: 6px; }
+  .links .direct { font-size: 12px; }
+  .links .save { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .hint .btn { margin-top: 8px; }
+
+  /* 분류 묶음 제목 */
+  .ghead { display: flex; align-items: center; gap: 10px; margin: 22px 0 10px; font-size: 17px; font-weight: 650; }
+  .ghead:first-child { margin-top: 0; }
+  .ghead .gname { word-break: keep-all; overflow-wrap: anywhere; }
+  .ghead .gcnt { color: var(--muted); font-size: 13px; font-weight: 500; margin-right: auto; }
+  .ghead .gpick { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .ghead .gpick input { accent-color: var(--ink); }
+  .indexwrap { margin-bottom: 40px; }
+  .indexwrap .index { margin-bottom: 8px; }
+  .dghead { margin: 0; padding: 34px 0 12px; border-top: 2px solid var(--ink); scroll-margin-top: 12px; font-size: 19px; }
 
   .totop {
     position: fixed; right: 14px; bottom: 16px; z-index: 5; padding: 9px 13px; border-radius: 20px;
@@ -195,24 +212,142 @@
 <div class="toast" id="toast"></div>
 
 <script>
+// ==CRYPTO-BEGIN==
+/*
+ * v2 비밀번호 공유 복호화 — 서버(Code.gs encryptManifest_)와 바이트 단위로 같아야 한다(CONTRACT.md §6.2).
+ *   dk = PBKDF2-HMAC-SHA256(utf8(pw), salt, iter, 32B)
+ *   encKey = HMAC(dk,"enc"), macKey = HMAC(dk,"mac")
+ *   블록 i = HMAC(encKey, iv || uint32be(i)), 평문 = 암호문 XOR 키스트림
+ *   mac = HMAC(macKey, iv || 암호문) — 복호화 전에 상수 시간 비교, 다르면 비밀번호 틀림
+ */
+var StashCrypto = (function () {
+  'use strict';
+  var C = (typeof self !== 'undefined' && self.crypto) || (typeof globalThis !== 'undefined' && globalThis.crypto) || null;
+  var subtle = C && C.subtle;
+
+  function utf8(s) { return new TextEncoder().encode(String(s)); }
+  function b64d(s) {
+    var bin = atob(String(s));
+    var u = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return u;
+  }
+  function b64e(u) {
+    var s = '';
+    for (var i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function hex(buf) {
+    var u = new Uint8Array(buf), s = '';
+    for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+    return s;
+  }
+  function concat(a, b) {
+    var o = new Uint8Array(a.length + b.length);
+    o.set(a, 0); o.set(b, a.length);
+    return o;
+  }
+  function hmacKey(raw) { return subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); }
+  function sign(key, msg) { return subtle.sign('HMAC', key, msg).then(function (b) { return new Uint8Array(b); }); }
+  function hmac(raw, msg) { return hmacKey(raw).then(function (k) { return sign(k, msg); }); }
+  function ctEq(a, b) {
+    if (a.length !== b.length) return false;
+    var r = 0;
+    for (var i = 0; i < a.length; i++) r |= a[i] ^ b[i];
+    return r === 0;
+  }
+
+  /** 비밀번호 → dk(32B) */
+  function deriveKey(pw, saltB64, iter) {
+    return subtle.importKey('raw', utf8(pw), 'PBKDF2', false, ['deriveBits']).then(function (k) {
+      return subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: b64d(saltB64), iterations: iter }, k, 256);
+    }).then(function (bits) { return new Uint8Array(bits); });
+  }
+
+  function macError() { var e = new Error('mac'); e.code = 'mac'; return e; }
+
+  /** env(m.json) + dk → 평문 객체. MAC이 안 맞으면 code:'mac' */
+  function decrypt(env, dk) {
+    var iv, ct, mac;
+    try { iv = b64d(env.iv); ct = b64d(env.data); mac = b64d(env.mac); }
+    catch (e) { var be = new Error('bad'); be.code = 'bad'; return Promise.reject(be); }
+    if (iv.length !== 16 || mac.length !== 32) return Promise.reject(macError());
+    return Promise.all([hmac(dk, utf8('enc')), hmac(dk, utf8('mac'))]).then(function (keys) {
+      return hmac(keys[1], concat(iv, ct)).then(function (calc) {
+        if (!ctEq(calc, mac)) throw macError();
+        return hmacKey(keys[0]);
+      });
+    }).then(function (encKey) {
+      var nBlocks = Math.ceil(ct.length / 32);
+      var out = new Uint8Array(ct.length);
+      var block = function (i) {
+        var b = new Uint8Array(20);
+        b.set(iv, 0);
+        b[16] = (i >>> 24) & 255; b[17] = (i >>> 16) & 255; b[18] = (i >>> 8) & 255; b[19] = i & 255;
+        return sign(encKey, b).then(function (ks) {
+          var off = i * 32, end = Math.min(32, ct.length - off);
+          for (var j = 0; j < end; j++) out[off + j] = ct[off + j] ^ ks[j];
+        });
+      };
+      var next = 0;
+      var step = function () {
+        if (next >= nBlocks) return Promise.resolve();
+        var ps = [];
+        for (var c = 0; c < 512 && next < nBlocks; c++) ps.push(block(next++));
+        return Promise.all(ps).then(step);
+      };
+      return step().then(function () {
+        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(out));
+      });
+    });
+  }
+
+  function sha256Hex(u8) { return subtle.digest('SHA-256', u8).then(hex); }
+
+  return { available: !!subtle, utf8: utf8, b64d: b64d, b64e: b64e, deriveKey: deriveKey, decrypt: decrypt, sha256Hex: sha256Hex };
+})();
+// ==CRYPTO-END==
+
 (function () {
   'use strict';
 
-  // Stash 공유 서버(Apps Script 웹앱 /exec). 배포 주소가 바뀌면 여기만 고친다.
+  // Stash 공유 서버(Apps Script 웹앱 /exec). 배포 주소가 바뀌면 여기만 고친다. (옛 링크 vOpen/vFile·열람수 vPing)
   var API_URL = 'https://script.google.com/macros/s/AKfycbxvFvuB0KAovb436Je0oa8GHBb_i7sbnfUE5Na1cSNyAgHAtRNK0wK7Bd1bIPnctEVjag/exec';
-  var ID_RE = /^[A-Za-z0-9]{10}$/;
+  // Google Drive API 키(공개 파일 읽기 전용) — v2 링크(#<m.json ID>)와 원본 받기에 쓴다. SETUP.md 7번 참고.
+  // GCP 콘솔에서 'Google Drive API'만 허용 + HTTP 리퍼러 https://bizforbiz.github.io/* 로 제한해서 넣는다.
+  var DRIVE_API_KEY = 'AIzaSyAK-yPss5VFI5CThSQVoAx9-Gie26UKEa0';
+  var DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files/';
+  var ID_RE = /^[A-Za-z0-9]{10}$/;            // 옛 링크: shareId(10자)
+  var MID_RE = /^[A-Za-z0-9_-]{25,60}$/;      // v2 링크: m.json 파일 ID
   var RETRIES = 4;         // 구글 echo 단계 되튐(실측 ~30%) — 같은 reqId로 재시도(서버가 중복 실행 안 함)
+  var CHUNK_OVER = 150;    // 이보다 많으면 화면을 프레임 단위로 나눠 그린다
+  var CHUNK = 40;
+  var BUILD_RETRY_MS = 5000;
 
-  var SHARE_ID = '';
+  var KEY_OK = /^[A-Za-z0-9_-]{20,}$/.test(DRIVE_API_KEY) && DRIVE_API_KEY.indexOf('REPLACE_') !== 0;
+
+  var MODE = '';           // 'v1' | 'v2'
+  var SHARE_ID = '';       // v1 shareId
+  var MID = '';            // v2 m.json ID
   var TOKEN_KEY = '';
   var app = document.getElementById('app');
-  var share = null;        // vOpen 결과
+  var share = null;        // {title, createdAt, expiresAt, allowDownload, showMemo, items, order, legacy}
   var token = null;
   var picked = {};         // n → true (ZIP 선택)
+  var cells = {};          // n → {cell, cb}
+  var groupBoxes = [];     // [{cb, items}]
   var busy = false;        // ZIP 진행 중
+  var UA = navigator.userAgent || '';
+  var IS_INAPP = /KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\/|DaumApps|everytimeApp/i.test(UA);
+  var IS_KAKAO = /KAKAOTALK/i.test(UA);
+  var IS_ANDROID = /Android/i.test(UA);
+  var IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+  var ZIP_PART_MAX = (IS_MOBILE ? 250 : 1500) * 1024 * 1024;   // ZIP 한 개 상한(바이트)
   var gen = 0;             // 화면 세대 — 주소(#)가 바뀔 때마다 +1. 옛 세대의 비동기 결과는 버린다(A→B→A도 구분)
   var lbList = [];         // 라이트박스 대상(이미지 항목)
   var lbPos = 0;
+  var retryTimer = null;   // building 자동 재확인
+  var pendingScroll = null;
 
   /* ── 공통 ── */
 
@@ -224,7 +359,7 @@
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  /* ── 서버 호출 ── */
+  /* ── 서버 호출 (옛 링크) ── */
 
   function newReqId() {
     var a = new Uint8Array(16);
@@ -234,8 +369,6 @@
     for (var j = 0; j < a.length; j++) s += ('0' + a[j].toString(16)).slice(-2);
     return s;
   }
-
-  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   /** 한 번 보내기 → 응답 JSON(ok 필드 있는 객체). 끊김·HTML·시간 초과는 reject(재시도 대상). */
   function postOnce(body, timeoutMs) {
@@ -311,6 +444,20 @@
     });
   }
 
+  /** v2 열람수 신호 — 응답을 기다리지 않는다(실패 무시). 같은 탭에서 한 번만. */
+  function ping(mid) {
+    var k = 'stash_pg_' + mid;
+    if (storeGet(k)) return;
+    storeSet(k, '1');
+    try {
+      fetch(API_URL, {
+        method: 'POST', mode: 'no-cors', credentials: 'omit', redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'vPing', mid: mid })
+      }).catch(function () { /* 무시 */ });
+    } catch (e) { /* 무시 */ }
+  }
+
   function storeGet(k) { try { return window.sessionStorage.getItem(k); } catch (e) { return null; } }
   function storeSet(k, v) { try { window.sessionStorage.setItem(k, v); } catch (e) { /* 저장 불가 환경 무시 */ } }
   function storeDel(k) { try { window.sessionStorage.removeItem(k); } catch (e) { /* 무시 */ } }
@@ -334,6 +481,11 @@
     return (b / 1048576).toFixed(1) + ' MB';
   }
   function isHttp(u) { return typeof u === 'string' && /^https?:\/\//i.test(u); }
+  function isPast(iso) {
+    if (!iso) return false;
+    var t = Date.parse(iso);
+    return !isNaN(t) && t <= Date.now();
+  }
 
   function thumbUrl(id) { return 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(id) + '=w400'; }
   function bigUrl(id) { return 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(id) + '=w1600'; }
@@ -341,6 +493,7 @@
   function fullUrl(id) { return 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(id) + (share && share.allowDownload ? '=s0' : '=w2400'); }
   function fallbackUrl(id, w) { return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=w' + w; }
   function dlUrl(id) { return 'https://drive.google.com/uc?export=download&id=' + encodeURIComponent(id); }
+  function driveMediaUrl(id) { return DRIVE_FILES + encodeURIComponent(id) + '?alt=media&key=' + encodeURIComponent(DRIVE_API_KEY); }
 
   /** lh3 실패 시 drive 썸네일로 한 번만 폴백 */
   function setImg(img, primary, id, w) {
@@ -359,7 +512,7 @@
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 1800);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 2200);
   }
 
   /* ── 상태 화면 ── */
@@ -386,7 +539,12 @@
     app.appendChild(box);
   }
 
-  function passwordScreen(errMsg) {
+  function expiredScreen() {
+    stateScreen('만료된 링크입니다', '공유 기간이 끝났습니다. 필요하면 보내준 사람에게 다시 요청하세요.');
+  }
+
+  /** onSubmit(pw, done) — done(errMsg)를 부르면 버튼이 다시 살아난다 */
+  function passwordScreen(errMsg, onSubmit) {
     clear(app);
     var box = el('div', 'state');
     box.appendChild(el('h2', null, '비밀번호가 필요합니다'));
@@ -407,8 +565,9 @@
       var pw = input.value;
       if (!pw) { input.focus(); return; }
       btn.disabled = true;
+      btn.textContent = '확인 중…';
       err.textContent = '';
-      open(pw, null);
+      onSubmit(pw);
     };
     box.appendChild(form);
     box.appendChild(err);
@@ -416,64 +575,279 @@
     setTimeout(function () { input.focus(); }, 50);
   }
 
-  /* ── 열기 ── */
+  /* ── 열기: 옛 링크(#<shareId>) — Apps Script vOpen ── */
 
-  function open(password, tok) {
+  function openV1(password, tok) {
     var id = SHARE_ID, myGen = gen;
     if (!password) loading();
     api('vOpen', { shareId: id, password: password || null, token: tok || null }).then(function (r) {
       if (myGen !== gen) return;   // 그 사이 주소(#)가 바뀜 — 옛 응답 버림
       if (!r || !r.ok) {
-        stateScreen('불러오지 못했습니다', (r && r.error) || '잠시 후 다시 시도해 주세요.', '다시 시도', function () { open(null, token); });
+        stateScreen('불러오지 못했습니다', (r && r.error) || '잠시 후 다시 시도해 주세요.', '다시 시도', function () { openV1(null, token); });
         return;
       }
+      var submit = function (pw) { openV1(pw, null); };
       switch (r.state) {
         case 'ready':
           token = r.token;
           storeSet(TOKEN_KEY, token);
-          share = r;
-          document.title = r.title || 'Stash 공유';
-          render();
+          showShare(r, true);
           break;
         case 'needPassword':
           storeDel(TOKEN_KEY);
-          passwordScreen('');
+          passwordScreen('', submit);
           break;
         case 'badPassword':
-          passwordScreen('비밀번호가 맞지 않습니다.');
+          passwordScreen('비밀번호가 맞지 않습니다.', submit);
           break;
         case 'rateLimited':
           // 공유 단위 잠금이라 다른 사람이 틀린 경우에도 걸린다 — 일시적임을 분명히
-          passwordScreen('비밀번호 입력이 너무 많이 실패해 잠시 잠겼습니다. 10분쯤 뒤 다시 시도하세요(계속 막히면 보내준 사람에게 알려 주세요).');
+          passwordScreen('비밀번호 입력이 너무 많이 실패해 잠시 잠겼습니다. 10분쯤 뒤 다시 시도하세요(계속 막히면 보내준 사람에게 알려 주세요).', submit);
           break;
         case 'expired':
-          stateScreen('만료된 링크입니다', '공유 기간이 끝났습니다. 필요하면 보내준 사람에게 다시 요청하세요.');
+          expiredScreen();
           break;
         case 'building':
-          stateScreen('준비 중…', '사진을 올리는 중입니다. 잠시 후 새로고침해 주세요.', '새로고침', function () { open(null, token); });
+          stateScreen('준비 중…', '사진을 올리는 중입니다. 잠시 후 새로고침해 주세요.', '새로고침', function () { openV1(null, token); });
           break;
         default:
           stateScreen('링크를 찾을 수 없습니다', '삭제되었거나 주소가 잘못되었습니다.');
       }
     }).catch(function (e) {
       if (myGen !== gen) return;
-      stateScreen('불러오지 못했습니다', '네트워크 상태를 확인한 뒤 다시 시도해 주세요.', '다시 시도', function () { open(null, token); });
+      stateScreen('불러오지 못했습니다', '네트워크 상태를 확인한 뒤 다시 시도해 주세요.', '다시 시도', function () { openV1(null, token); });
       if (window.console) console.error(e);
     });
   }
 
+  /* ── 열기: v2 링크(#<m.json ID>) — Drive API에서 m.json 바로 읽기(Apps Script 안 거침) ── */
+
+  var RATE_REASONS = /rateLimit|userRateLimit|dailyLimit|quotaExceeded|downloadQuotaExceeded|backendError|internalError/i;
+  var GONE_REASONS = /notFound|insufficientFilePermissions/i;
+  var CONFIG_REASONS = /keyInvalid|keyExpired|ipRefererBlocked|accessNotConfigured|API_KEY|referer|referrer|SERVICE_DISABLED/i;
+
+  function errInfo(res) {
+    return res.text().then(function (t) {
+      var reasons = '';
+      try {
+        var j = JSON.parse(t);
+        var er = j && j.error;
+        if (er) {
+          reasons = (er.message || '') + ' ' + (er.status || '') + ' ' +
+            (er.errors || []).map(function (x) { return x.reason || ''; }).join(' ') + ' ' +
+            (er.details || []).map(function (x) { return x.reason || ''; }).join(' ');
+        }
+      } catch (e) { reasons = t.slice(0, 300); }
+      return reasons;
+    }, function () { return ''; });
+  }
+
+  /** → {kind:'ok', env} | {kind:'gone'} | {kind:'config', msg}. 네트워크·일시 오류는 몇 번 다시 시도 후 reject. */
+  function fetchManifest(mid) {
+    var attempt = 0;
+    var once = function () {
+      attempt++;
+      var ctl = window.AbortController ? new AbortController() : null;
+      var timer = ctl ? setTimeout(function () { ctl.abort(); }, 20000) : null;
+      return fetch(driveMediaUrl(mid), { credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+        .then(function (res) {
+          if (res.ok) {
+            return res.text().then(function (t) {
+              var env;
+              try { env = JSON.parse(t); } catch (e) { return { kind: 'bad' }; }
+              return { kind: 'ok', env: env };
+            });
+          }
+          return errInfo(res).then(function (why) {
+            if (CONFIG_REASONS.test(why) || res.status === 401) return { kind: 'config', msg: why };
+            if (res.status === 429 || res.status >= 500 || RATE_REASONS.test(why)) throw new Error('일시 오류 ' + res.status);
+            if (res.status === 404 || res.status === 400 || res.status === 410) return { kind: 'gone' };
+            if (res.status === 403 && GONE_REASONS.test(why)) return { kind: 'gone' };
+            // 그 밖의 403(cannotDownloadFile·domainPolicy 등)은 살아 있는 공유일 수 있다 → 다시 시도 화면
+            return { kind: 'error', msg: res.status + ' ' + why };
+          });
+        })
+        .then(function (r) { if (timer) clearTimeout(timer); return r; },
+          function (e) {
+            if (timer) clearTimeout(timer);
+            if (attempt >= 3) throw e;
+            return new Promise(function (r) { setTimeout(r, 800 * attempt); }).then(once);
+          });
+    };
+    return once();
+  }
+
+  function openV2(quiet) {
+    var mid = MID, myGen = gen;
+    clearTimeout(retryTimer);
+    if (!KEY_OK) {
+      stateScreen('뷰어 설정이 끝나지 않았습니다', '보내준 사람에게 알려 주세요. (Drive API 키 미설정)');
+      return;
+    }
+    if (!quiet) loading();
+    fetchManifest(mid).then(function (r) {
+      if (myGen !== gen) return;
+      if (r.kind === 'gone') {
+        stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.');
+        return;
+      }
+      if (r.kind === 'error') {
+        stateScreen('불러오지 못했습니다', '잠시 후 다시 시도해 주세요.', '다시 시도', function () { openV2(false); });
+        if (window.console) console.error('m.json 읽기 실패:', r.msg);
+        return;
+      }
+      if (r.kind === 'config') {
+        stateScreen('지금은 열 수 없습니다', '공유 화면 설정 문제입니다. 보내준 사람에게 알려 주세요.', '다시 시도', function () { openV2(false); });
+        if (window.console) console.error('Drive API 설정 오류:', r.msg);
+        return;
+      }
+      var env = r.env;
+      if (r.kind !== 'ok' || !env || typeof env !== 'object' || env.v !== 2) {
+        stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다. 보내준 사람에게 알려 주세요.');
+        return;
+      }
+      if (env.status === 'building') {
+        stateScreen('준비 중…', '사진을 올리는 중입니다. 자동으로 다시 확인합니다.');
+        retryTimer = setTimeout(function () { if (myGen === gen) openV2(true); }, BUILD_RETRY_MS);
+        return;
+      }
+      if (env.status === 'gone') { stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+      if (env.status !== 'ready') { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
+      if (isPast(env.expiresAt)) { expiredScreen(); return; }
+      if (env.enc) unlockV2(env, myGen);
+      else showV2(env.data);
+    }, function (e) {
+      if (myGen !== gen) return;
+      stateScreen('불러오지 못했습니다', '네트워크 상태를 확인한 뒤 다시 시도해 주세요.', '다시 시도', function () { openV2(false); });
+      if (window.console) console.error(e);
+    });
+  }
+
+  function encOk(env) {
+    var k = env.kdf || {};
+    return k.alg === 'pbkdf2-sha256' && env.cipher === 'hmac-sha256-ctr' &&
+      typeof k.iter === 'number' && Math.floor(k.iter) === k.iter && k.iter >= 1000 && k.iter <= 5000000 &&
+      typeof k.salt === 'string' && typeof env.iv === 'string' && typeof env.mac === 'string' && typeof env.data === 'string';
+  }
+
+  function unlockV2(env, myGen) {
+    if (!StashCrypto.available) {
+      stateScreen('이 브라우저에서는 열 수 없습니다', '비밀번호가 걸린 공유는 최신 크롬·사파리·엣지에서 열어 주세요.');
+      return;
+    }
+    if (!encOk(env)) { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
+    var dkKey = 'stash_dk_' + MID;
+    var ask = function (msg) {
+      passwordScreen(msg, function (pw) {
+        StashCrypto.deriveKey(pw, env.kdf.salt, env.kdf.iter).then(function (dk) {
+          return StashCrypto.decrypt(env, dk).then(function (data) {
+            if (myGen !== gen) return;
+            storeSet(dkKey, StashCrypto.b64e(dk));   // 새로고침 때 다시 묻지 않게(이 탭에서만)
+            showV2(data);
+          });
+        }).catch(function (e) {
+          if (myGen !== gen) return;
+          if (e && e.code === 'bad') { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
+          if (e && e.code === 'mac') ask('비밀번호가 틀렸습니다.');
+          else { ask('열지 못했습니다. 다시 시도해 주세요.'); if (window.console) console.error(e); }
+        });
+      });
+    };
+    var saved = storeGet(dkKey);
+    if (!saved) { ask(''); return; }
+    var dk;
+    try { dk = StashCrypto.b64d(saved); } catch (e) { dk = null; }
+    if (!dk || dk.length !== 32) { storeDel(dkKey); ask(''); return; }
+    loading();
+    Promise.resolve().then(function () { return StashCrypto.decrypt(env, dk); }).then(function (data) {
+      if (myGen === gen) showV2(data);
+    }, function (e) {
+      if (myGen !== gen) return;
+      storeDel(dkKey);
+      if (e && e.code === 'bad') { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
+      ask('');   // 비밀번호가 바뀜 → 다시 묻는다
+    });
+  }
+
+  function showV2(data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
+      stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.');
+      return;
+    }
+    if (isPast(data.expiresAt)) { expiredScreen(); return; }
+    ping(MID);
+    showShare(data, false);
+  }
+
+  function showShare(d, legacy) {
+    share = {
+      title: d.title || '',
+      createdAt: d.createdAt || '',
+      expiresAt: d.expiresAt || null,
+      allowDownload: d.allowDownload !== false,
+      showMemo: d.showMemo !== false,
+      items: (d.items || []).filter(function (x) { return x && typeof x === 'object'; }),
+      legacy: legacy
+    };
+    document.title = share.title || 'Stash 공유';
+    render();
+  }
+
   /* ── 본문 렌더 ── */
+
+  function catLabel(it) {
+    var c = typeof it.category === 'string' ? it.category.trim() : '';
+    return c || '미분류';
+  }
+
+  /** 분류별 묶음(처음 나온 순서). 분류가 하나뿐이면 묶음 1개. */
+  function groupItems(items) {
+    var map = {}, groups = [];
+    items.forEach(function (it) {
+      var k = catLabel(it);
+      if (!Object.prototype.hasOwnProperty.call(map, k)) { map[k] = { label: k, items: [] }; groups.push(map[k]); }
+      map[k].items.push(it);
+    });
+    return groups;
+  }
+
+  /** 할 일을 프레임 단위로 나눠 실행 — 항목이 많아도 첫 화면이 바로 뜨고 스크롤이 막히지 않게 */
+  function runTasks(tasks, myGen) {
+    if (tasks.length <= CHUNK_OVER) {
+      tasks.forEach(function (t) { t(); });
+      document.body.setAttribute('data-rendered', '1');
+      return;
+    }
+    var i = 0;
+    var raf = window.requestAnimationFrame || function (f) { return setTimeout(f, 16); };
+    var step = function () {
+      if (myGen !== gen) return;
+      var end = Math.min(tasks.length, i + CHUNK);
+      for (; i < end; i++) tasks[i]();
+      if (i < tasks.length) raf(step);
+      else document.body.setAttribute('data-rendered', '1');
+    };
+    step();
+  }
 
   function render() {
     clear(app);
-    picked = {};
-    var items = share.items || [];
-    lbList = items.filter(isImage);
+    picked = {}; cells = {}; groupBoxes = []; pendingScroll = null;
+    document.body.removeAttribute('data-rendered');
+    var items = share.items.slice().sort(function (a, b) { return (a.n || 0) - (b.n || 0); });
+    share.items = items;
+    var groups = groupItems(items);
+    var grouped = groups.length > 1;
+    var order = [];
+    groups.forEach(function (g) { order = order.concat(g.items); });
+    share.order = order;
+    lbList = order.filter(isImage);
 
     // 머리말: 제목 · 개수 · 공유일 · 만료일
     var head = el('header', 'top');
     head.appendChild(el('h1', null, share.title || 'Stash 공유'));
     var sub = [items.length + '개 항목'];
+    if (grouped) sub.push(groups.length + '개 분류');
     if (share.createdAt) sub.push(fmtDate(share.createdAt) + ' 공유');
     sub.push(share.expiresAt ? fmtDate(share.expiresAt) + '까지 열람 가능' : '기한 없음');
     head.appendChild(el('div', 'sub', sub.join(' · ')));
@@ -481,25 +855,124 @@
 
     if (!items.length) {
       app.appendChild(el('p', 'sub', '공유된 항목이 없습니다.'));
+      document.body.setAttribute('data-rendered', '1');
       return;
     }
 
-    if (share.allowDownload) app.appendChild(buildDlBar(items));
+    if (share.allowDownload) app.appendChild(buildDlBar(order));
 
-    // 번호 썸네일 인덱스
-    var idx = el('div', 'index');
-    items.forEach(function (it) { idx.appendChild(buildCell(it)); });
-    app.appendChild(idx);
+    var tasks = [];
+    var idxWrap = el('div', 'indexwrap');
+    var detWrap = el('div', 'details');
+    app.appendChild(idxWrap);
+    app.appendChild(detWrap);
 
-    // 한 장씩 상세
-    items.forEach(function (it) { app.appendChild(buildDetail(it)); });
+    // 번호 썸네일 인덱스(분류가 여럿이면 분류 제목 + 개수)
+    groups.forEach(function (g, gi) {
+      var grid = el('div', 'index');
+      if (grouped) idxWrap.appendChild(buildGroupHead(g, gi, true));
+      idxWrap.appendChild(grid);
+      g.items.forEach(function (it) { tasks.push(function () { grid.appendChild(buildCell(it)); }); });
+    });
+    // 한 장씩 상세(같은 순서)
+    groups.forEach(function (g, gi) {
+      if (grouped) tasks.push(function () { detWrap.appendChild(buildGroupHead(g, gi, false)); });
+      g.items.forEach(function (it) {
+        tasks.push(function () {
+          detWrap.appendChild(buildDetail(it));
+          if (pendingScroll === it.n) { pendingScroll = null; scrollToItem(it.n); }
+        });
+      });
+    });
+    runTasks(tasks, gen);
   }
 
-  function buildDlBar(items) {
+  function buildGroupHead(g, gi, inIndex) {
+    var h = el('h2', inIndex ? 'ghead' : 'ghead dghead');
+    if (!inIndex) h.id = 'g-' + gi;
+    h.appendChild(el('span', 'gname', g.label));
+    h.appendChild(el('span', 'gcnt', g.items.length + '개'));
+    if (inIndex) {
+      var go = el('button', 'btn small glink', '상세 ↓');
+      go.type = 'button';
+      go.onclick = function () {
+        var t = document.getElementById('g-' + gi);
+        if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        else if (g.items[0]) { pendingScroll = g.items[0].n; }
+      };
+      h.appendChild(go);
+      if (share.allowDownload) {
+        var lab = el('label', 'gpick');
+        var cb = el('input');
+        cb.type = 'checkbox';
+        cb.setAttribute('aria-label', g.label + ' 전체 선택');
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode('선택'));
+        cb.onchange = function () {
+          g.items.forEach(function (it) { if (cb.checked) picked[it.n] = true; else delete picked[it.n]; });
+          syncPicks();
+        };
+        groupBoxes.push({ cb: cb, items: g.items });
+        h.appendChild(lab);
+      }
+    }
+    return h;
+  }
+
+  /** 앱 안 브라우저(카카오톡 등)에서 외부 브라우저로 여는 주소. 없으면 null(메뉴 안내만). */
+  function externalOpenUrl() {
+    var href = location.href;
+    if (IS_KAKAO) return 'kakaotalk://web/openExternal?url=' + encodeURIComponent(href);
+    if (IS_ANDROID && /^https:\/\//i.test(href)) {
+      return 'intent://' + href.replace(/^https:\/\//i, '') + '#Intent;scheme=https;package=com.android.chrome;end';
+    }
+    return null;
+  }
+
+  function sumSize(list) {
+    var t = 0;
+    list.forEach(function (it) { if (it.fileId && it.kind !== 'text' && it.size > 0) t += it.size; });
+    return t;
+  }
+
+  /** ZIP 한 개 상한 — 넘으면 여러 개로 나눠 하나씩 만들고 저장(휴대폰 브라우저 메모리 부족으로 탭이 죽지 않게) */
+  function zipParts(withFile) {
+    var parts = [[]], acc = 0;
+    withFile.forEach(function (it) {
+      var sz = it.size > 0 ? it.size : 0;
+      var cur = parts[parts.length - 1];
+      if (cur.length && acc + sz > ZIP_PART_MAX) { parts.push([]); acc = 0; cur = parts[parts.length - 1]; }
+      cur.push(it);
+      acc += sz;
+    });
+    return parts;
+  }
+
+  function zipAllLabel(order) {
+    var total = sumSize(order);
+    if (!total) return '전체 ZIP';
+    var withFile = order.filter(function (it) { return it.fileId && it.kind !== 'text'; });
+    var n = zipParts(withFile).length;
+    return '전체 ZIP (' + fmtSize(total) + (n > 1 ? ' · ' + n + '개로 나눔' : '') + ')';
+  }
+
+  function buildDlBar(order) {
     var frag = document.createDocumentFragment();
-    if (/KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\//i.test(navigator.userAgent || '')) {
-      frag.appendChild(el('div', 'hint',
-        '앱 안 브라우저에서는 묶음(ZIP) 다운로드가 안 될 수 있습니다. 오른쪽 위 메뉴의 "다른 브라우저로 열기"를 이용하거나 항목별 "원본 받기"를 누르세요.'));
+    if (IS_INAPP) {
+      var hint = el('div', 'hint');
+      hint.id = 'inappHint';
+      var ext = externalOpenUrl();
+      hint.appendChild(document.createTextNode(
+        '앱 안 브라우저에서는 사진 저장·묶음(ZIP) 다운로드가 안 될 수 있습니다. ' +
+        (ext ? '아래 버튼으로 다른 브라우저에서 열어 주세요.' : '메뉴의 "다른 브라우저로 열기"(또는 "Safari로 열기")를 이용해 주세요.')));
+      if (ext) {
+        var ob = el('a', 'btn primary', '다른 브라우저로 열기');
+        ob.id = 'openExternal';
+        ob.href = ext;
+        hint.appendChild(el('br'));
+        hint.appendChild(ob);
+      }
+      frag.appendChild(hint);
     }
     var bar = el('div', 'dlbar');
     var allLabel = el('label');
@@ -509,7 +982,7 @@
     allLabel.appendChild(all);
     allLabel.appendChild(document.createTextNode('전체 선택'));
     all.onchange = function () {
-      items.forEach(function (it) { if (all.checked) picked[it.n] = true; else delete picked[it.n]; });
+      order.forEach(function (it) { if (all.checked) picked[it.n] = true; else delete picked[it.n]; });
       syncPicks();
     };
     var selBtn = el('button', 'btn', '선택 ZIP');
@@ -517,12 +990,12 @@
     selBtn.id = 'zipSel';
     selBtn.disabled = true;
     selBtn.onclick = function () {
-      makeZip(items.filter(function (it) { return picked[it.n]; }), false);
+      makeZip(order.filter(function (it) { return picked[it.n]; }), false);
     };
-    var allBtn = el('button', 'btn primary', '전체 ZIP');
+    var allBtn = el('button', 'btn primary', zipAllLabel(order));
     allBtn.type = 'button';
     allBtn.id = 'zipAll';
-    allBtn.onclick = function () { makeZip(items, true); };
+    allBtn.onclick = function () { makeZip(order, true); };
     var st = el('div', 'dlstatus');
     st.id = 'dlstatus';
     bar.appendChild(allLabel);
@@ -539,12 +1012,14 @@
     items.forEach(function (it) {
       var on = !!picked[it.n];
       if (on) count++;
-      var cell = document.getElementById('c-' + it.n);
-      if (cell) {
-        cell.classList.toggle('picked', on);
-        var cb = cell.querySelector('input');
-        if (cb) cb.checked = on;
+      var c = cells[it.n];
+      if (c) {
+        c.cell.classList.toggle('picked', on);
+        if (c.cb) c.cb.checked = on;
       }
+    });
+    groupBoxes.forEach(function (g) {
+      g.cb.checked = g.items.every(function (it) { return picked[it.n]; });
     });
     var sel = document.getElementById('zipSel');
     if (sel) {
@@ -553,6 +1028,12 @@
     }
     var all = document.getElementById('pickAll');
     if (all) all.checked = count > 0 && count === items.length;
+  }
+
+  function scrollToItem(n) {
+    var target = document.getElementById('i-' + n);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else pendingScroll = n;   // 아직 안 그려짐 — 그려지는 순간 이동
   }
 
   function buildCell(it) {
@@ -587,10 +1068,12 @@
       cell.appendChild(dot);
     }
 
+    var cb = null;
     if (share.allowDownload) {
       var pick = el('label', 'pick');
-      var cb = el('input');
+      cb = el('input');
       cb.type = 'checkbox';
+      cb.checked = !!picked[it.n];
       cb.setAttribute('aria-label', pad(it.n) + '번 선택');
       pick.appendChild(cb);
       pick.onclick = function (e) { e.stopPropagation(); };
@@ -600,11 +1083,10 @@
       };
       cell.appendChild(pick);
     }
+    if (picked[it.n]) cell.classList.add('picked');
+    cells[it.n] = { cell: cell, cb: cb };
 
-    var go = function () {
-      var target = document.getElementById('i-' + it.n);
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
+    var go = function () { scrollToItem(it.n); };
     cell.onclick = go;
     cell.onkeydown = function (e) { if (e.key === 'Enter') go(); };
     return cell;
@@ -640,11 +1122,9 @@
         var fm = [it.mime, fmtSize(it.size)].filter(Boolean).join(' · ');
         if (fm) fb.appendChild(el('div', 'fmeta', fm));
         if (share.allowDownload) {
-          var a = el('a', 'btn primary', '파일 받기');
-          a.href = dlUrl(it.fileId);
-          a.target = '_blank';
-          a.rel = 'noopener';
-          fb.appendChild(a);
+          var row = el('div', 'links center');
+          appendDownload(row, it, '파일 받기', 'btn primary');
+          fb.appendChild(row);
         }
         media.appendChild(fb);
       }
@@ -672,11 +1152,7 @@
 
       var links = el('div', 'links');
       if (share.allowDownload && hasMedia && isImage(it)) {
-        var dl = el('a', 'btn small', '원본 받기');
-        dl.href = dlUrl(it.fileId);
-        dl.target = '_blank';
-        dl.rel = 'noopener';
-        links.appendChild(dl);
+        appendDownload(links, it, '원본 받기', 'btn small');
         if (it.size) links.appendChild(el('span', 'src', fmtSize(it.size)));
       }
       if (isHttp(it.sourceUrl)) {
@@ -692,6 +1168,148 @@
 
     if (!hasMedia || !hasSide) sec.classList.add('solo');
     return sec;
+  }
+
+  /** 검증 수준 → 안내 문구 */
+  var LEVEL_TEXT = { hash: '원본 일치(SHA-256) 확인', size: '크기만 확인(해시 정보 없음)', none: '확인 정보 없음(검증 안 됨)' };
+
+  /**
+   * 항목별 받기 — 원본 바이트를 받아 크기·SHA-256 확인 후 저장.
+   * 저장은 자동 클릭 + 눈에 보이는 '저장하기' 링크(앱 안 브라우저·사용자 동작 만료 대비).
+   * 직접 링크(Drive)는 검증 없는 수동 폴백 — 보관된 사본 자체가 원본과 다르면(storedBad) 숨긴다.
+   */
+  function appendDownload(parent, it, label, cls) {
+    var btn = el('button', cls, label);
+    btn.type = 'button';
+    btn.className += ' dl1';
+    var save = el('a', 'src save', '저장하기');
+    save.style.display = 'none';
+    var a = el('a', 'src direct', '직접 링크(확인 안 됨)');
+    a.href = dlUrl(it.fileId);
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.title = '검증 없이 드라이브에서 바로 받습니다';
+    btn.onclick = function () {
+      if (btn.disabled) return;
+      var myGen = gen;
+      btn.disabled = true;
+      btn.textContent = '받는 중…';
+      save.style.display = 'none';
+      getVerified(it).then(function (r) {
+        if (myGen !== gen) return;
+        var url = saveBytes(r.bytes, displayName(it), it.mime);
+        btn.textContent = label + ' ✓';
+        btn.setAttribute('data-level', r.level);
+        if (url) {
+          if (save.href && save.href.indexOf('blob:') === 0) { try { URL.revokeObjectURL(save.href); } catch (e) { /* 무시 */ } }
+          save.href = url;
+          save.download = displayName(it);
+          save.style.display = '';
+          toast('저장을 시작했습니다 · ' + LEVEL_TEXT[r.level] + '. 안 되면 "저장하기"를 누르세요');
+        }
+      }, function (e) {
+        if (myGen !== gen) return;
+        btn.textContent = label;
+        if (e && e.storedBad) {
+          // 보관된 사본 자체가 원본과 다름 — 직접 링크도 같은 바이트이므로 내주지 않는다
+          a.style.display = 'none';
+          a.removeAttribute('href');
+          toast('검증 실패: 원본과 다릅니다 — 보낸 사람에게 다시 공유를 요청하세요');
+        } else if (e && e.mismatch) {
+          toast('검증 실패: 원본과 달라 저장하지 않았습니다. 잠시 후 다시 시도하거나 "직접 링크(확인 안 됨)"를 이용하세요.');
+        } else {
+          toast('받지 못했습니다. 다시 시도하거나 "직접 링크(확인 안 됨)"를 이용하세요.');
+        }
+        btn.setAttribute('data-failed', e && e.mismatch ? 'mismatch' : 'fetch');
+      }).then(function () { if (myGen === gen) btn.disabled = false; });
+    };
+    parent.appendChild(btn);
+    parent.appendChild(save);
+    parent.appendChild(a);
+  }
+
+  /* ── 원본 받기(바이트 그대로 + 검증) ── */
+
+  /** htmlGuard: lh3 '=d'처럼 오류·확인 페이지가 HTML로 올 수 있는 출처에서만 text/html 거부.
+   *  Drive API alt=media는 파일 자신의 MIME으로 주므로(.html 파일이면 text/html) 거부하지 않는다 — 크기·해시로 검증. */
+  function fetchBytes(url, htmlGuard) {
+    return fetch(url, { credentials: 'omit', cache: 'no-store' }).then(function (res) {
+      var ct = (res.headers.get('Content-Type') || '').toLowerCase();
+      if (!res.ok || (htmlGuard && ct.indexOf('text/html') >= 0)) throw new Error('HTTP ' + res.status);
+      return res.arrayBuffer();
+    }).then(function (b) { return new Uint8Array(b); });
+  }
+
+  /** → Promise<{ok, why?, level?}> — 크기(알면)·SHA-256(있으면) 둘 다 맞아야 ok.
+   *  level: 'hash'(해시 일치) | 'size'(크기만) | 'none'(비교할 정보 없음 — 검증 안 됨) */
+  function verifyBytes(it, u8) {
+    var hasSize = typeof it.size === 'number' && it.size > 0;
+    if (hasSize && u8.byteLength !== it.size) return Promise.resolve({ ok: false, why: '크기 불일치' });
+    var hasSha = typeof it.sha256 === 'string' && /^[0-9a-fA-F]{64}$/.test(it.sha256);
+    if (!hasSha || !StashCrypto.available) return Promise.resolve({ ok: true, level: hasSize ? 'size' : 'none' });
+    return StashCrypto.sha256Hex(u8).then(function (h) {
+      return h === it.sha256.toLowerCase() ? { ok: true, level: 'hash' } : { ok: false, why: '해시 불일치' };
+    });
+  }
+
+  /**
+   * 원본 한 건: Drive API(정확한 바이트) → (이미지) lh3 '=d' → (옛 링크) 서버 vFile 순서로 시도,
+   * 받을 때마다 검증. 하나라도 맞으면 {bytes, level}. 전부 실패하면 reject —
+   * 받긴 했는데 안 맞은 경우 mismatch:true, 그중 정확한 바이트 출처(Drive API·vFile)가 안 맞았으면 storedBad:true
+   * (보관된 사본 자체가 원본과 다름 → 직접 링크도 같은 바이트). 검증에 실패한 바이트는 절대 돌려주지 않는다.
+   */
+  function getVerified(it) {
+    var sources = [];
+    if (KEY_OK) sources.push({ exact: true, get: function () { return fetchBytes(driveMediaUrl(it.fileId), false); } });
+    if (it.kind === 'image') sources.push({ exact: false, get: function () { return fetchBytes('https://lh3.googleusercontent.com/d/' + encodeURIComponent(it.fileId) + '=d', true); } });
+    if (share && share.legacy) {
+      var sid = SHARE_ID, tok = token;
+      sources.push({ exact: true, get: function () {
+        return api('vFile', { shareId: sid, token: tok, n: it.n }).then(function (r) {
+          if (!r || !r.ok) throw new Error((r && r.error) || 'vFile 실패');
+          return StashCrypto.b64d(r.b64);
+        });
+      } });
+    }
+    var mismatch = false, storedBad = false, lastWhy = '';
+    var i = 0;
+    var tryNext = function () {
+      if (i >= sources.length) {
+        var e = new Error(lastWhy || '받지 못함');
+        e.mismatch = mismatch;
+        e.storedBad = storedBad;
+        return Promise.reject(e);
+      }
+      var src = sources[i++];
+      return Promise.resolve().then(src.get).then(function (u8) {
+        return verifyBytes(it, u8).then(function (v) {
+          if (v.ok) return { bytes: u8, level: v.level };
+          mismatch = true; lastWhy = v.why;
+          if (src.exact) storedBad = true;
+          return tryNext();
+        });
+      }, function (err) {
+        if (!mismatch) lastWhy = (err && err.message) || '받지 못함';
+        return tryNext();
+      });
+    };
+    return tryNext();
+  }
+
+  /** 검증된 바이트 저장 — 자동 클릭을 시도하고 blob URL을 돌려준다(수동 '저장하기' 링크용, 10분 뒤 해제). */
+  function saveBytes(u8, name, mime) {
+    var blob = new Blob([u8], { type: mime || 'application/octet-stream' });
+    var url;
+    try { url = URL.createObjectURL(blob); } catch (e) { toast('이 브라우저에서는 저장이 안 됩니다. 다른 브라우저로 열어 주세요.'); return null; }
+    var a = el('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    try { a.click(); } catch (e) { /* 수동 링크로 폴백 */ }
+    document.body.removeChild(a);
+    setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) { /* 무시 */ } }, 10 * 60 * 1000);
+    return url;
   }
 
   /* ── 메모 복사 ── */
@@ -811,6 +1429,10 @@
     return String(s || 'Stash 공유').replace(/[\\/:*?"<>|\r\n\t]+/g, ' ').trim().slice(0, 80) || 'Stash 공유';
   }
 
+  /**
+   * ZIP — 3개씩 동시에 받아 검증한 것만 넣는다(이미지는 STORE). 합계가 ZIP_PART_MAX를 넘으면 여러 개로 나눠
+   * 한 묶음씩 만들고 저장한 뒤, 사용자가 '다음 묶음 받기'를 누르면 앞 묶음을 놓고 다음을 만든다(메모리는 한 묶음치만).
+   */
   function makeZip(list, isAll) {
     if (busy || !list.length) return;
     if (!window.JSZip) {
@@ -818,78 +1440,145 @@
       return;
     }
     setBusy(true);
-    var zip = new window.JSZip();
     var withFile = list.filter(function (it) { return it.fileId && it.kind !== 'text'; });
-    var failed = [];
+    var parts = zipParts(withFile);
+    var failed = [];     // 받지 못함
+    var badHash = [];    // 받았지만 원본과 다름 → 제외
+    var levels = { hash: 0, size: 0, none: 0 };
     var memoTxt = '';
     if (share.showMemo) {
       list.forEach(function (it) { if (it.memo) memoTxt += pad(it.n) + '\n' + it.memo + '\n\n'; });
     }
-
-    var sid = SHARE_ID, tok = token, cur = share;   // 도중에 주소(#)가 바뀌어도 이 공유 기준으로
+    var cur = share;
     var myGen = gen;   // 주소가 바뀌면 이 작업은 조용히 멈춘다 — 새 화면의 상태 막대·busy를 건드리지 않는다
     var stale = function () { return myGen !== gen; };
-    // 원본은 구글 파일 서버에서 직접 받는다(원본 바이트 그대로, CORS 허용, 1초 안팎).
-    // 안 되면(큰 파일 바이러스 검사 안내 페이지 등) 공유 서버 vFile로 폴백. 3개씩 동시에.
-    var doneCount = 0;
-    var fetchDirect = function (it) {
-      // 이미지: lh3 '=d'는 원본 바이트 그대로 + CORS 허용(실측). 그 외 파일: Drive 다운로드 서버.
-      var url = it.kind === 'image'
-        ? 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(it.fileId) + '=d'
-        : 'https://drive.usercontent.google.com/download?id=' + encodeURIComponent(it.fileId) + '&export=download';
-      return fetch(url, { credentials: 'omit', cache: 'no-store' }).then(function (res) {
-        var ct = (res.headers.get('Content-Type') || '').toLowerCase();
-        if (!res.ok || ct.indexOf('text/html') >= 0) throw new Error('direct ' + res.status);
-        return res.arrayBuffer();
-      });
-    };
-    var one = function (it) {
-      // 파일명의 '/'·'\'는 ZIP 안에서 폴더가 되므로 바꾼다
-      var fname = function (n) { return '원본/' + String(n || it.name || pad(it.n)).replace(/[\\/]+/g, '_'); };
-      return fetchDirect(it).then(function (buf) {
-        if (!stale()) zip.file(fname(it.name), buf);
-      }).catch(function () {
-        if (stale()) return;
-        return api('vFile', { shareId: sid, token: tok, n: it.n }).then(function (r) {
-          if (r && r.ok) zip.file(fname(r.name), r.b64, { base64: true });
-          else failed.push(pad(it.n) + (r && r.error ? ' (' + r.error + ')' : ''));
-        }, function () { failed.push(pad(it.n)); });
-      }).then(function () {
-        doneCount++;
-        if (!stale()) setStatus('원본 받는 중… ' + doneCount + ' / ' + withFile.length, doneCount / Math.max(1, withFile.length));
-      });
-    };
-    var next = 0;
-    var worker = function () {
-      if (next >= withFile.length || stale()) return Promise.resolve();
-      var it = withFile[next++];
-      return one(it).then(worker);
-    };
-    setStatus('원본 받는 중… 0 / ' + withFile.length, 0);
+    var baseName = safeFileName(cur.title) + (isAll ? '' : ' (선택 ' + list.length + '개)');
+    var prevUrl = null;
 
-    Promise.all([worker(), worker(), worker()]).then(function () {
-      if (stale()) return null;
-      if (memoTxt) zip.file('메모.txt', '﻿' + memoTxt);
-      if (withFile.length - failed.length === 0 && !memoTxt) throw new Error('받을 파일이 없습니다.');
-      setStatus('압축 중…', 0);
-      return zip.generateAsync({ type: 'blob' }, function (m) { if (!stale()) setStatus('압축 중… ' + Math.round(m.percent) + '%', m.percent / 100); });
-    }).then(function (blob) {
-      if (!blob || stale()) return;
-      var name = safeFileName(cur.title) + (isAll ? '' : ' (선택 ' + list.length + '개)') + '.zip';
-      saveBlob(blob, name, failed);
-    }).catch(function (e) {
-      if (stale()) return;
-      setStatus('묶음을 만들지 못했습니다' + (e && e.message ? ': ' + e.message : '') + '. 항목별 "원본 받기"를 이용하세요.');
-    }).then(function () { if (!stale()) setBusy(false); });
+    var finish = function () {
+      if (prevUrl) {
+        var u = prevUrl;
+        prevUrl = null;
+        setTimeout(function () { try { URL.revokeObjectURL(u); } catch (e) { /* 무시 */ } }, 10 * 60 * 1000);
+      }
+      if (!stale()) setBusy(false);
+    };
+
+    var runPart = function (k) {
+      var items = parts[k];
+      var multi = parts.length > 1;
+      var tag = multi ? '(' + (k + 1) + '/' + parts.length + ') ' : '';
+      var withMemo = k === 0 && !!memoTxt;
+      var zip = new window.JSZip();
+      var added = 0, doneCount = 0;
+      var one = function (it) {
+        // 파일명의 '/'·'\'는 ZIP 안에서 폴더가 되므로 바꾼다
+        var fname = '원본/' + String(it.name || pad(it.n)).replace(/[\\/]+/g, '_');
+        return getVerified(it).then(function (r) {
+          if (stale()) return;
+          // 이미 압축된 사진은 다시 압축하지 않는다(STORE) — 빠르고 바이트 그대로
+          zip.file(fname, r.bytes, { binary: true, compression: it.kind === 'image' ? 'STORE' : 'DEFLATE' });
+          levels[r.level] = (levels[r.level] || 0) + 1;
+          added++;
+        }, function (e) {
+          if (stale()) return;
+          if (e && e.mismatch) badHash.push(pad(it.n));
+          else failed.push(pad(it.n));
+        }).then(function () {
+          doneCount++;
+          if (!stale()) setStatus(tag + '원본 받는 중… ' + doneCount + ' / ' + items.length, doneCount / Math.max(1, items.length));
+        });
+      };
+      var next = 0;
+      var worker = function () {
+        if (next >= items.length || stale()) return Promise.resolve();
+        var it = items[next++];
+        return one(it).then(worker);
+      };
+      setStatus(tag + '원본 받는 중… 0 / ' + items.length, 0);
+      Promise.all([worker(), worker(), worker()]).then(function () {
+        if (stale()) return null;
+        if (withMemo) zip.file('메모.txt', '﻿' + memoTxt, { compression: 'DEFLATE' });
+        if (!added && !withMemo) {
+          if (multi) return null;   // 이 묶음은 전부 실패 — 아래에서 다음 묶음 안내
+          throw new Error('받을 파일이 없습니다');
+        }
+        setStatus(tag + '압축 중…', 0);
+        return zip.generateAsync({ type: 'blob' }, function (m) { if (!stale()) setStatus(tag + '압축 중… ' + Math.round(m.percent) + '%', m.percent / 100); });
+      }).then(function (blob) {
+        zip = null;   // 다음 묶음 전에 받은 바이트를 놓는다
+        if (stale()) return;
+        if (prevUrl) { try { URL.revokeObjectURL(prevUrl); } catch (e) { /* 무시 */ } prevUrl = null; }
+        if (blob) prevUrl = saveBlob(blob, baseName + (multi ? ' (' + (k + 1) + '-' + parts.length + ')' : '') + '.zip', tag);
+        else setStatus(tag + '이 묶음은 받을 수 있는 파일이 없었습니다.');
+        var st = document.getElementById('dlstatus');
+        if (k + 1 < parts.length && st) {
+          var row = el('div');
+          var go = el('button', 'btn primary', '다음 묶음 받기 (' + (k + 2) + '/' + parts.length + ')');
+          go.type = 'button';
+          go.id = 'zipNext';
+          var stop = el('button', 'btn', '그만두기');
+          stop.type = 'button';
+          go.onclick = function () { if (!stale()) runPart(k + 1); };
+          stop.onclick = function () {
+            if (stale()) return;
+            setStatus('묶음 받기를 멈췄습니다.');
+            appendSummary(levels, failed, badHash);
+            finish();
+          };
+          row.appendChild(go);
+          row.appendChild(document.createTextNode(' '));
+          row.appendChild(stop);
+          st.appendChild(row);
+          appendSummary(levels, failed, badHash);
+          return;
+        }
+        appendSummary(levels, failed, badHash);
+        finish();
+      }).catch(function (e) {
+        if (stale()) return;
+        setStatus(tag + '묶음을 만들지 못했습니다' + (e && e.message ? ': ' + e.message : '') + '. 항목별 "원본 받기"를 이용하세요.');
+        appendSummary(levels, failed, badHash);
+        finish();
+      });
+    };
+    runPart(0);
   }
 
-  function saveBlob(blob, name, failed) {
+  /** 검증 수준·실패 요약을 상태 칸에 덧붙인다. '원본 일치'는 전부 해시로 확인됐을 때만. */
+  function appendSummary(levels, failed, badHash) {
+    var st = document.getElementById('dlstatus');
+    if (!st) return;
+    var total = levels.hash + levels.size + levels.none;
+    if (total) {
+      var txt = (levels.size || levels.none)
+        ? '해시 확인 ' + levels.hash + '개' + (levels.size ? ' · 크기만 확인 ' + levels.size + '개' : '') +
+          (levels.none ? ' · 확인 정보 없음 ' + levels.none + '개' : '')
+        : '원본 일치 확인(SHA-256) ' + levels.hash + '개';
+      var v = el('div', null, txt);
+      v.id = 'verifyLevels';
+      st.appendChild(v);
+    }
+    if (badHash.length) {
+      var b = el('div', 'err', '검증 실패 ' + badHash.length + '개(원본과 달라 묶음에서 뺐습니다 — 보낸 사람에게 다시 공유를 요청하세요): ' + badHash.join(', '));
+      b.id = 'badhash';
+      st.appendChild(b);
+    }
+    if (failed.length) {
+      var f = el('div', 'err', '받지 못한 항목 ' + failed.length + '개: ' + failed.join(', '));
+      f.id = 'dlfailed';
+      st.appendChild(f);
+    }
+  }
+
+  /** ZIP 저장 — 자동 클릭 + 수동 링크. 반환: blob URL(호출한 쪽이 해제) */
+  function saveBlob(blob, name, tag) {
     var st = document.getElementById('dlstatus');
     var url;
     try { url = URL.createObjectURL(blob); } catch (e) { url = null; }
     if (!url) {
-      setStatus('이 브라우저에서는 묶음 저장이 안 됩니다. 항목별 "원본 받기"를 이용하세요.');
-      return;
+      setStatus('이 브라우저에서는 묶음 저장이 안 됩니다. 다른 브라우저로 열거나 항목별 "원본 받기"를 이용하세요.');
+      return null;
     }
     var a = el('a');
     a.href = url;
@@ -900,49 +1589,58 @@
     document.body.removeChild(a);
 
     setStatus(null);
-    st.appendChild(document.createTextNode('ZIP 준비 완료 (' + fmtSize(blob.size) + '). '));
-    var again = el('a', null, '저장이 안 되면 여기를 누르세요');
+    st.appendChild(document.createTextNode((tag || '') + 'ZIP 저장을 시작했습니다 (' + fmtSize(blob.size) + '). '));
+    var again = el('a', 'zipsave', '저장이 안 되면 여기를 누르세요');
     again.href = url;
     again.download = name;
     st.appendChild(again);
-    st.appendChild(el('div', null, '그래도 안 되면(앱 안 브라우저 등) 다른 브라우저로 열거나 항목별 "원본 받기"를 이용하세요.'));
-    if (failed.length) st.appendChild(el('div', 'err', '빠진 항목 ' + failed.length + '개: ' + failed.join(', ')));
-    // blob URL은 수동 링크용으로 잠시 유지 후 해제
-    setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) { /* 무시 */ } }, 10 * 60 * 1000);
+    st.appendChild(el('div', null, '그래도 안 되면(앱 안 브라우저 등) 다른 브라우저로 열어 주세요.'));
+    return url;
   }
 
   /* ── 시작 ── */
 
-  /** 주소에서 공유 ID: #<id> (기본 — 서버 로그에 안 남음), ?s=<id>도 받아 준다 */
+  /** 주소 → {mode, id}. #<m.json ID>(v2) · #<shareId>(옛) · ?s=<shareId>(옛) */
   function readId() {
     var h = (location.hash || '').replace(/^#/, '');
     try { h = decodeURIComponent(h); } catch (e) { /* 그대로 */ }
     h = h.replace(/^s=/, '').trim();
-    if (ID_RE.test(h)) return h;
+    if (ID_RE.test(h)) return { mode: 'v1', id: h };
+    if (MID_RE.test(h)) return { mode: 'v2', id: h };
     var m = /[?&]s=([^&#]*)/.exec(location.search || '');
     var q = m ? m[1] : '';
-    return ID_RE.test(q) ? q : '';
+    return ID_RE.test(q) ? { mode: 'v1', id: q } : { mode: '', id: '' };
   }
 
+  function curKey() { return MODE + ':' + (MODE === 'v2' ? MID : SHARE_ID); }
+
   function start() {
-    var id = readId();
+    var r = readId();
     if (lb.classList.contains('open')) closeLb();
-    gen++;   // 진행 중인 vOpen·ZIP 결과는 이제 무시된다
-    share = null; token = null; picked = {}; lbList = []; busy = false;
+    gen++;   // 진행 중인 열기·ZIP·자동 재확인 결과는 이제 무시된다
+    clearTimeout(retryTimer);
+    share = null; token = null; picked = {}; cells = {}; groupBoxes = []; lbList = []; busy = false; pendingScroll = null;
     document.title = 'Stash 공유';
+    document.body.removeAttribute('data-rendered');   // 다 그려졌는지 표시(테스트·자동화용) — 새 공유는 처음부터
     window.scrollTo(0, 0);
-    SHARE_ID = id;
-    if (!id) {
-      TOKEN_KEY = '';
-      stateScreen('링크가 올바르지 않습니다', '보내준 사람에게 링크를 다시 확인해 달라고 해 주세요.');
+    MODE = r.mode; SHARE_ID = ''; MID = ''; TOKEN_KEY = '';
+    if (r.mode === 'v2') {
+      MID = r.id;
+      openV2(false);
       return;
     }
-    TOKEN_KEY = 'stash_tok_' + id;
-    open(null, storeGet(TOKEN_KEY));
+    if (r.mode === 'v1') {
+      SHARE_ID = r.id;
+      TOKEN_KEY = 'stash_tok_' + r.id;
+      openV1(null, storeGet(TOKEN_KEY));
+      return;
+    }
+    stateScreen('링크가 올바르지 않습니다', '보내준 사람에게 링크를 다시 확인해 달라고 해 주세요.');
   }
 
   window.addEventListener('hashchange', function () {
-    if (readId() !== SHARE_ID) start();
+    var r = readId();
+    if (r.mode + ':' + r.id !== curKey()) start();
   });
   start();
 })();
