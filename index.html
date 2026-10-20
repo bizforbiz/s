@@ -147,7 +147,7 @@
 
   /* 분류 묶음 제목 */
   .ghead { display: flex; align-items: center; gap: 10px; margin: 22px 0 10px; font-size: 17px; font-weight: 650; }
-  .ghead:first-child { margin-top: 0; }
+  .igrp:first-child > .ghead { margin-top: 0; }
   .ghead .gname { word-break: keep-all; overflow-wrap: anywhere; }
   .ghead .gcnt { color: var(--muted); font-size: 13px; font-weight: 500; margin-right: auto; }
   .ghead .gpick { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500; cursor: pointer; }
@@ -155,6 +155,28 @@
   .indexwrap { margin-bottom: 40px; }
   .indexwrap .index { margin-bottom: 8px; }
   .dghead { margin: 0; padding: 34px 0 12px; border-top: 2px solid var(--ink); scroll-margin-top: 12px; font-size: 19px; }
+
+  /* 업로드 중 막대(보낸 사람이 아직 올리는 중) — 화면 위에 얇게 붙어 있음 */
+  .upbar {
+    position: sticky; top: 0; z-index: 6; margin: -28px -16px 18px; padding: 8px 16px 7px;
+    background: #eef4ec; border-bottom: 1px solid #cfe0c9; color: #24502f; font-size: 13px;
+  }
+  .upbar .bar { height: 3px; background: rgba(36,80,47,.15); border-radius: 2px; overflow: hidden; margin-top: 5px; }
+  .upbar .bar i { display: block; height: 100%; width: 0; background: #2e9d5b; transition: width .4s; }
+  .upbar.stalled { background: #fbf3e4; border-bottom-color: #ecd9b2; color: #6b4a12; }
+  .upbar.stalled .bar i { background: #c08a2c; }
+
+  /* 실시간 공유 표시(보낸 사람이 모델·카테고리를 통째로 공유 — 새로 올린 항목이 자동으로 나타남) */
+  .livebadge {
+    display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; padding: 3px 11px;
+    font-size: 13px; color: #24502f; background: #eef4ec; border: 1px solid #cfe0c9; border-radius: 999px;
+  }
+  .livebadge i {
+    width: 8px; height: 8px; border-radius: 50%; background: #2e9d5b; flex: none;
+    animation: livepulse 2.4s ease-in-out infinite;
+  }
+  @keyframes livepulse { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .livebadge i { animation: none; } }
 
   .totop {
     position: fixed; right: 14px; bottom: 16px; z-index: 5; padding: 9px 13px; border-radius: 20px;
@@ -189,6 +211,7 @@
 
   @media (max-width: 720px) {
     .wrap { padding-top: 20px; }
+    .upbar { margin-top: -20px; }
     header.top h1 { font-size: 20px; }
     .index { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
     .item { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 20px 0; }
@@ -323,6 +346,8 @@ var StashCrypto = (function () {
   var CHUNK_OVER = 150;    // 이보다 많으면 화면을 프레임 단위로 나눠 그린다
   var CHUNK = 40;
   var BUILD_RETRY_MS = 5000;
+  var BUILD_RETRY_SLOW_MS = 30000;          // '준비 중'이 오래가면(첫 묶음 공유 설정 실패 등) 느리게
+  var BUILD_SLOW_AFTER_MS = 2 * 60 * 1000;
 
   var KEY_OK = /^[A-Za-z0-9_-]{20,}$/.test(DRIVE_API_KEY) && DRIVE_API_KEY.indexOf('REPLACE_') !== 0;
 
@@ -333,9 +358,15 @@ var StashCrypto = (function () {
   var app = document.getElementById('app');
   var share = null;        // {title, createdAt, expiresAt, allowDownload, showMemo, items, order, legacy}
   var token = null;
-  var picked = {};         // n → true (ZIP 선택)
-  var cells = {};          // n → {cell, cb}
-  var groupBoxes = [];     // [{cb, items}]
+  var picked = {};         // 항목 키(itemKey) → true (ZIP 선택) — 번호는 업로드가 끝날 때 바뀔 수 있어 키로
+  var entries = {};        // 항목 키 → {key, it, g, cell, cb, det, …} (렌더 참고)
+  var groups = [];         // 분류 묶음 [{id, label, entries, iw, grid, dw, ihead, dhead, cb}] — 화면 순서
+  var groupMap = {};       // 분류 이름 → 묶음
+  var groupSeq = 0;
+  var idxWrap = null, detWrap = null, hdrSub = null, titleEl = null, upbar = null;
+  var headEl = null, liveEl = null;   // 머리말 · 실시간 공유 표시
+  var syncOn = false;      // 지금 여는 공유가 실시간 공유인지(showShare가 share.sync로 옮김)
+  var padW = 3;            // 번호 자릿수(1000번부터 4)
   var busy = false;        // ZIP 진행 중
   var UA = navigator.userAgent || '';
   var IS_INAPP = /KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\/|DaumApps|everytimeApp/i.test(UA);
@@ -347,7 +378,8 @@ var StashCrypto = (function () {
   var lbList = [];         // 라이트박스 대상(이미지 항목)
   var lbPos = 0;
   var retryTimer = null;   // building 자동 재확인
-  var pendingScroll = null;
+  var buildSince = 0;      // 'building'을 처음 본 시각(0 = 아님)
+  var pendingScroll = null;  // 아직 안 그려진 상세로 이동 예약(항목 키)
 
   /* ── 공통 ── */
 
@@ -462,10 +494,18 @@ var StashCrypto = (function () {
   function storeSet(k, v) { try { window.sessionStorage.setItem(k, v); } catch (e) { /* 저장 불가 환경 무시 */ } }
   function storeDel(k) { try { window.sessionStorage.removeItem(k); } catch (e) { /* 무시 */ } }
 
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  /** 업데이트 시각 표시 — 오늘이면 '오늘 14:03', 아니면 '10/20 14:03' */
+  function fmtStamp(iso) {
+    var d = new Date(iso || '');
+    if (isNaN(d.getTime())) return '';
+    var hm = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    return d.toDateString() === new Date().toDateString() ? '오늘 ' + hm : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+  }
+
   function pad(n) {
-    var w = share && share.items.length > 999 ? 4 : 3;
     var s = String(n);
-    while (s.length < w) s = '0' + s;
+    while (s.length < padW) s = '0' + s;
     return s;
   }
   function fmtDate(iso) {
@@ -494,6 +534,8 @@ var StashCrypto = (function () {
   function fallbackUrl(id, w) { return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=w' + w; }
   function dlUrl(id) { return 'https://drive.google.com/uc?export=download&id=' + encodeURIComponent(id); }
   function driveMediaUrl(id) { return DRIVE_FILES + encodeURIComponent(id) + '?alt=media&key=' + encodeURIComponent(DRIVE_API_KEY); }
+  // m.json 다시 읽기용 — '_' 쿼리는 Drive API가 무시한다(실측 200). 응답도 max-age=0이지만 중간 캐시까지 확실히 피한다.
+  function manifestUrl(id, bust) { return driveMediaUrl(id) + (bust ? '&_=' + Date.now() : ''); }
 
   /** lh3 실패 시 drive 썸네일로 한 번만 폴백 */
   function setImg(img, primary, id, w) {
@@ -519,6 +561,7 @@ var StashCrypto = (function () {
 
   function stateScreen(title, sub, actionLabel, action) {
     clear(app);
+    document.body.removeAttribute('data-rendered');   // 보던 공유가 업로드 중 다른 화면으로 바뀐 경우(만료·비밀번호 등) 표시도 지운다
     var box = el('div', 'state');
     box.appendChild(el('h2', null, title));
     if (sub) box.appendChild(el('p', null, sub));
@@ -533,6 +576,7 @@ var StashCrypto = (function () {
 
   function loading(msg) {
     clear(app);
+    document.body.removeAttribute('data-rendered');
     var box = el('div', 'state');
     box.appendChild(el('div', 'spinner'));
     box.appendChild(el('p', null, msg || '불러오는 중…'));
@@ -546,6 +590,7 @@ var StashCrypto = (function () {
   /** onSubmit(pw, done) — done(errMsg)를 부르면 버튼이 다시 살아난다 */
   function passwordScreen(errMsg, onSubmit) {
     clear(app);
+    document.body.removeAttribute('data-rendered');
     var box = el('div', 'state');
     box.appendChild(el('h2', null, '비밀번호가 필요합니다'));
     box.appendChild(el('p', null, '보내준 사람에게 받은 비밀번호를 입력하세요.'));
@@ -643,13 +688,13 @@ var StashCrypto = (function () {
   }
 
   /** → {kind:'ok', env} | {kind:'gone'} | {kind:'config', msg}. 네트워크·일시 오류는 몇 번 다시 시도 후 reject. */
-  function fetchManifest(mid) {
+  function fetchManifest(mid, bust) {
     var attempt = 0;
     var once = function () {
       attempt++;
       var ctl = window.AbortController ? new AbortController() : null;
       var timer = ctl ? setTimeout(function () { ctl.abort(); }, 20000) : null;
-      return fetch(driveMediaUrl(mid), { credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+      return fetch(manifestUrl(mid, bust), { credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
         .then(function (res) {
           if (res.ok) {
             return res.text().then(function (t) {
@@ -677,9 +722,21 @@ var StashCrypto = (function () {
     return once();
   }
 
+  /** '준비 중' 재확인 예약 — 탭이 안 보이면 받지 않고 다시 예약만(보이면 visibilitychange가 바로 확인) */
+  function armBuildRetry(myGen, ms) {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(function () {
+      if (myGen !== gen) return;
+      if (document.hidden) { armBuildRetry(myGen, ms); return; }
+      retryTimer = null;
+      openV2(true);
+    }, ms);
+  }
+
   function openV2(quiet) {
     var mid = MID, myGen = gen;
     clearTimeout(retryTimer);
+    retryTimer = null;
     if (!KEY_OK) {
       stateScreen('뷰어 설정이 끝나지 않았습니다', '보내준 사람에게 알려 주세요. (Drive API 키 미설정)');
       return;
@@ -707,15 +764,19 @@ var StashCrypto = (function () {
         return;
       }
       if (env.status === 'building') {
-        stateScreen('준비 중…', '사진을 올리는 중입니다. 자동으로 다시 확인합니다.');
-        retryTimer = setTimeout(function () { if (myGen === gen) openV2(true); }, BUILD_RETRY_MS);
+        if (!buildSince) buildSince = Date.now();
+        var slow = Date.now() - buildSince > BUILD_SLOW_AFTER_MS;
+        if (slow) stateScreen('업로드가 멈춘 것 같습니다', '아직 올라온 사진이 없습니다. 보낸 사람이 다시 올리면 자동으로 보여 드립니다.');
+        else stateScreen('준비 중…', '사진을 올리기 시작했습니다. 첫 사진이 올라오면 자동으로 보여 드립니다.');
+        armBuildRetry(myGen, slow ? BUILD_RETRY_SLOW_MS : BUILD_RETRY_MS);
         return;
       }
+      buildSince = 0;
       if (env.status === 'gone') { stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
-      if (env.status !== 'ready') { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
+      if (env.status !== 'ready' && env.status !== 'uploading') { stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.'); return; }
       if (isPast(env.expiresAt)) { expiredScreen(); return; }
       if (env.enc) unlockV2(env, myGen);
-      else showV2(env.data);
+      else showV2(env.data, env, null);
     }, function (e) {
       if (myGen !== gen) return;
       stateScreen('불러오지 못했습니다', '네트워크 상태를 확인한 뒤 다시 시도해 주세요.', '다시 시도', function () { openV2(false); });
@@ -743,7 +804,7 @@ var StashCrypto = (function () {
           return StashCrypto.decrypt(env, dk).then(function (data) {
             if (myGen !== gen) return;
             storeSet(dkKey, StashCrypto.b64e(dk));   // 새로고침 때 다시 묻지 않게(이 탭에서만)
-            showV2(data);
+            showV2(data, env, dk);
           });
         }).catch(function (e) {
           if (myGen !== gen) return;
@@ -760,7 +821,7 @@ var StashCrypto = (function () {
     if (!dk || dk.length !== 32) { storeDel(dkKey); ask(''); return; }
     loading();
     Promise.resolve().then(function () { return StashCrypto.decrypt(env, dk); }).then(function (data) {
-      if (myGen === gen) showV2(data);
+      if (myGen === gen) showV2(data, env, dk);
     }, function (e) {
       if (myGen !== gen) return;
       storeDel(dkKey);
@@ -769,14 +830,24 @@ var StashCrypto = (function () {
     });
   }
 
-  function showV2(data) {
+  /** env = 봉투(status·total·uploaded), dk = 비밀번호 공유 키(업로드 중 다시 풀 때 씀) */
+  function showV2(data, env, dk) {
     if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
       stateScreen('링크를 열 수 없습니다', '공유 정보가 올바르지 않습니다.');
       return;
     }
     if (isPast(data.expiresAt)) { expiredScreen(); return; }
     ping(MID);
+    syncOn = !!(env && env.status === 'ready' && env.live);
+    if (env && env.status === 'uploading') {
+      startLive(env, dk, data.items.length);
+      if (!data.items.length) {
+        stateScreen('준비 중…', '사진을 올리기 시작했습니다. 첫 사진이 올라오면 자동으로 보여 드립니다.');
+        return;
+      }
+    }
     showShare(data, false);
+    if (syncOn) startWatch(env, dk);
   }
 
   function showShare(d, legacy) {
@@ -787,29 +858,35 @@ var StashCrypto = (function () {
       allowDownload: d.allowDownload !== false,
       showMemo: d.showMemo !== false,
       items: (d.items || []).filter(function (x) { return x && typeof x === 'object'; }),
-      legacy: legacy
+      legacy: legacy,
+      live: !!live,
+      sync: !legacy && syncOn
     };
     document.title = share.title || 'Stash 공유';
     render();
   }
 
-  /* ── 본문 렌더 ── */
+  /* ── 본문 렌더 ──
+   * 항목 하나 = entry {key, it, g, cell, cb, numEl, det, nEl, imgEl}. key = 변하지 않는 키(fileId·k) —
+   * 업로드 중(uploading) 새로 온 항목은 기존 노드를 다시 만들지 않고 제자리(n 순)에 끼워 넣고,
+   * ready에서 번호가 당겨지면 글자·id만 바꾼다(스크롤·라이트박스·ZIP 상태 유지).
+   */
 
   function catLabel(it) {
     var c = typeof it.category === 'string' ? it.category.trim() : '';
     return c || '미분류';
   }
 
-  /** 분류별 묶음(처음 나온 순서). 분류가 하나뿐이면 묶음 1개. */
-  function groupItems(items) {
-    var map = {}, groups = [];
-    items.forEach(function (it) {
-      var k = catLabel(it);
-      if (!Object.prototype.hasOwnProperty.call(map, k)) { map[k] = { label: k, items: [] }; groups.push(map[k]); }
-      map[k].items.push(it);
-    });
-    return groups;
+  /** 항목의 변하지 않는 키 — 실시간 공유는 Stash 항목 id(k = 'i…' — 원본이 바뀌어 사본이 새로 생겨도 같은 항목),
+   *  그 밖의 사진·파일은 fileId, 텍스트는 서버가 주는 k(seq), 둘 다 없으면(옛 링크) 번호 */
+  function itemKey(it) {
+    if (typeof it.k === 'string' && it.k.charAt(0) === 'i') return 'k:' + it.k;
+    if (it.fileId) return 'f:' + it.fileId;
+    if (typeof it.k === 'string' && it.k) return 'k:' + it.k;
+    return 'n:' + it.n;
   }
+
+  function byN(a, b) { return (a.it.n || 0) - (b.it.n || 0); }
 
   /** 할 일을 프레임 단위로 나눠 실행 — 항목이 많아도 첫 화면이 바로 뜨고 스크롤이 막히지 않게 */
   function runTasks(tasks, myGen) {
@@ -830,75 +907,394 @@ var StashCrypto = (function () {
     step();
   }
 
+  /** 번호 자릿수 — 사본 이름(서버 numberedName_)과 같게 1000번부터 4자리 */
+  function calcPadW() {
+    var w = 3;
+    if (share) share.items.forEach(function (it) { if ((it.n || 0) > 999) w = 4; });
+    return w;
+  }
+
   function render() {
     clear(app);
-    picked = {}; cells = {}; groupBoxes = []; pendingScroll = null;
+    picked = {}; entries = {}; groups = []; groupMap = {}; pendingScroll = null; groupSeq = 0;
+    idxWrap = null; detWrap = null;
     document.body.removeAttribute('data-rendered');
-    var items = share.items.slice().sort(function (a, b) { return (a.n || 0) - (b.n || 0); });
-    share.items = items;
-    var groups = groupItems(items);
-    var grouped = groups.length > 1;
-    var order = [];
-    groups.forEach(function (g) { order = order.concat(g.items); });
-    share.order = order;
-    lbList = order.filter(isImage);
+    share.items.sort(function (a, b) { return (a.n || 0) - (b.n || 0); });
+    padW = calcPadW();
 
-    // 머리말: 제목 · 개수 · 공유일 · 만료일
+    upbar = null;
+    if (share.live) { upbar = buildUpbar(); app.appendChild(upbar); }
+
+    // 머리말: 제목 · 개수 · 공유일 · 만료일 (+ 실시간 공유 표시)
     var head = el('header', 'top');
-    head.appendChild(el('h1', null, share.title || 'Stash 공유'));
-    var sub = [items.length + '개 항목'];
-    if (grouped) sub.push(groups.length + '개 분류');
-    if (share.createdAt) sub.push(fmtDate(share.createdAt) + ' 공유');
-    sub.push(share.expiresAt ? fmtDate(share.expiresAt) + '까지 열람 가능' : '기한 없음');
-    head.appendChild(el('div', 'sub', sub.join(' · ')));
+    titleEl = el('h1', null, share.title || 'Stash 공유');
+    head.appendChild(titleEl);
+    hdrSub = el('div', 'sub');
+    head.appendChild(hdrSub);
     app.appendChild(head);
+    headEl = head;
+    liveEl = null;
+    ensureLiveBadge();
 
-    if (!items.length) {
-      app.appendChild(el('p', 'sub', '공유된 항목이 없습니다.'));
+    if (!share.items.length) {
+      app.appendChild(el('p', 'sub', share.sync ? '아직 공유된 항목이 없습니다. 보낸 사람이 추가하면 자동으로 나타납니다.' : '공유된 항목이 없습니다.'));
+      refreshMeta();
       document.body.setAttribute('data-rendered', '1');
       return;
     }
 
-    if (share.allowDownload) app.appendChild(buildDlBar(order));
+    if (share.allowDownload) app.appendChild(buildDlBar());
 
-    var tasks = [];
-    var idxWrap = el('div', 'indexwrap');
-    var detWrap = el('div', 'details');
+    idxWrap = el('div', 'indexwrap');
+    detWrap = el('div', 'details');
     app.appendChild(idxWrap);
     app.appendChild(detWrap);
 
-    // 번호 썸네일 인덱스(분류가 여럿이면 분류 제목 + 개수)
-    groups.forEach(function (g, gi) {
-      var grid = el('div', 'index');
-      if (grouped) idxWrap.appendChild(buildGroupHead(g, gi, true));
-      idxWrap.appendChild(grid);
-      g.items.forEach(function (it) { tasks.push(function () { grid.appendChild(buildCell(it)); }); });
-    });
-    // 한 장씩 상세(같은 순서)
-    groups.forEach(function (g, gi) {
-      if (grouped) tasks.push(function () { detWrap.appendChild(buildGroupHead(g, gi, false)); });
-      g.items.forEach(function (it) {
-        tasks.push(function () {
-          detWrap.appendChild(buildDetail(it));
-          if (pendingScroll === it.n) { pendingScroll = null; scrollToItem(it.n); }
-        });
-      });
-    });
+    var added = share.items.map(addEntry);
+    sortGroups();
+    ensureHeads();
+    refreshMeta();
+    // 인덱스(썸네일) 먼저, 그다음 한 장씩 상세 — 둘 다 n 순(분류가 여럿이면 분류 묶음 순)
+    var tasks = [];
+    added.forEach(function (e) { tasks.push(function () { mountCell(e); }); });
+    var ordered = [];
+    groups.forEach(function (g) { ordered = ordered.concat(g.entries); });
+    ordered.forEach(function (e) { tasks.push(function () { mountDet(e); }); });
     runTasks(tasks, gen);
   }
 
-  function buildGroupHead(g, gi, inIndex) {
+  /** 분류 이름 → 묶음(없으면 만들어 맨 뒤에 붙인다 — 순서는 sortGroups가 맞춤) */
+  function groupFor(label) {
+    var g = groupMap[label];
+    if (!g) {
+      g = { id: ++groupSeq, label: label, entries: [], iw: el('div', 'igrp'), grid: el('div', 'index'), dw: el('div', 'dgrp'),
+            ihead: null, dhead: null, cb: null };
+      g.iw.appendChild(g.grid);
+      groupMap[label] = g;
+      groups.push(g);
+      idxWrap.appendChild(g.iw);
+      detWrap.appendChild(g.dw);
+    }
+    return g;
+  }
+
+  /** 항목 → entry 등록(분류 묶음이 없으면 만든다). DOM은 아직 안 붙인다. */
+  function addEntry(it) {
+    var key = itemKey(it);
+    it._k = key;
+    var g = groupFor(catLabel(it));
+    var e = { key: key, it: it, g: g };
+    entries[key] = e;
+    // n 순 자리(이진 탐색) — 보통은 맨 뒤
+    var a = g.entries, lo = 0, hi = a.length, n = it.n || 0;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if ((a[mid].it.n || 0) <= n) lo = mid + 1; else hi = mid; }
+    a.splice(lo, 0, e);
+    return e;
+  }
+
+  /** 분류 묶음 순서 = 묶음의 가장 앞 번호 순(처음 나온 순서). 바뀐 것만 DOM에서 옮긴다(노드는 그대로). */
+  function sortGroups() {
+    var before = groups.slice();
+    groups.sort(function (a, b) {
+      var na = a.entries.length ? (a.entries[0].it.n || 0) : Infinity;
+      var nb = b.entries.length ? (b.entries[0].it.n || 0) : Infinity;
+      return na - nb || a.id - b.id;
+    });
+    var same = before.every(function (g, i) { return g === groups[i]; });
+    if (same) return;
+    groups.forEach(function (g) { idxWrap.appendChild(g.iw); detWrap.appendChild(g.dw); });
+  }
+
+  /** 분류가 2개 이상이 되면 묶음 제목을 단다(업로드 중 새 분류가 처음 오면 그때). 한 번 달면 그대로. */
+  function ensureHeads() {
+    if (groups.length < 2) return;
+    groups.forEach(function (g) {
+      if (!g.ihead) { g.ihead = buildGroupHead(g, true); g.iw.insertBefore(g.ihead, g.iw.firstChild); }
+      if (!g.dhead) { g.dhead = buildGroupHead(g, false); g.dw.insertBefore(g.dhead, g.dw.firstChild); }
+    });
+  }
+
+  /** 같은 묶음 안에서 e 뒤에 오는, 이미 붙은 노드(없으면 null = 맨 뒤) */
+  function nextMounted(e, prop) {
+    var a = e.g.entries;
+    var i = a.indexOf(e);
+    for (var j = i + 1; j < a.length; j++) if (a[j][prop]) return a[j][prop];
+    return null;
+  }
+
+  function mountCell(e) {
+    if (e.cell || !entries[e.key]) return;
+    var ref = nextMounted(e, 'cell');
+    var node = buildCell(e);
+    e.g.grid.insertBefore(node, ref);
+  }
+
+  function mountDet(e) {
+    if (e.det || !entries[e.key]) return;
+    var ref = nextMounted(e, 'det');
+    var node = buildDetail(e);
+    e.g.dw.insertBefore(node, ref);
+    if (pendingScroll === e.key) { pendingScroll = null; scrollToItem(e.it); }
+  }
+
+  /** 머리말 개수·묶음 개수·라이트박스 목록·ZIP 버튼·선택 상태 — 항목이 늘거나 번호가 바뀔 때마다 */
+  function refreshMeta() {
+    var order = [];
+    groups.forEach(function (g) { g.entries.forEach(function (e) { order.push(e.it); }); });
+    share.order = order;
+    var items = share.items;
+    var grouped = groups.length > 1;
+
+    var sub = [items.length + '개 항목'];
+    if (grouped) sub.push(groups.length + '개 분류');
+    if (share.createdAt) sub.push(fmtDate(share.createdAt) + ' 공유');
+    sub.push(share.expiresAt ? fmtDate(share.expiresAt) + '까지 열람 가능' : '기한 없음');
+    if (hdrSub) hdrSub.textContent = sub.join(' · ');
+
+    groups.forEach(function (g) {
+      var t = g.entries.length + '개';
+      [g.ihead, g.dhead].forEach(function (h) {
+        var c = h && h.querySelector('.gcnt');
+        if (c && c.textContent !== t) c.textContent = t;
+      });
+    });
+
+    // 라이트박스: 보고 있던 사진을 그대로 유지한 채 목록만 바꾼다
+    // (실시간 공유에서 보던 사진이 빠졌으면 옆 사진으로, 남은 사진이 없으면 닫는다)
+    var cur = lb.classList.contains('open') ? lbList[lbPos] : null;
+    lbList = order.filter(isImage);
+    if (cur) {
+      var p = lbList.indexOf(cur);
+      if (p >= 0) {
+        lbPos = p;
+        updateLbCount();
+      } else if (lbList.length) {
+        lbPos = Math.min(lbPos, lbList.length - 1);
+        showLb();
+      } else {
+        closeLb();
+      }
+    }
+
+    var za = document.getElementById('zipAll');
+    if (za) za.textContent = zipAllLabel(order);
+    if (share.allowDownload) syncPicks();
+  }
+
+  /** 번호가 바뀐 항목의 글자·id만 바꾼다(노드 유지) */
+  function relabel(e) {
+    var it = e.it, p = pad(it.n);
+    if (e.cell) {
+      e.cell.id = 'c-' + it.n;
+      e.cell.setAttribute('aria-label', p + '번으로 이동');
+      if (e.numEl.textContent !== p) e.numEl.textContent = p;
+      if (e.cb) e.cb.setAttribute('aria-label', p + '번 선택');
+      if (e.snipEl) e.snipEl.textContent = displayName(it);
+    }
+    if (e.det) {
+      e.det.id = 'i-' + it.n;
+      if (e.nEl && e.nEl.textContent !== p) e.nEl.textContent = p;
+      if (e.imgEl) e.imgEl.alt = p;
+      if (e.fnameEl) e.fnameEl.textContent = displayName(it);
+    }
+  }
+
+  /** 화면에 그리는 내용 — 이게 바뀌면 그 항목 노드를 새로 만든다(번호·이름만 바뀌면 글자만 고침) */
+  function renderSig(it) {
+    return [it.kind, it.fileId || '', it.memo || '', it.sourceUrl || '', it.createdAt || '',
+            it.width || 0, it.height || 0, it.mime || '', it.size || 0].join('\u001f');
+  }
+
+  /**
+   * 다시 읽은 목록을 화면에 합친다(업로드 중 이어 붙이기 · 실시간 공유 갱신) — 그대로인 노드는 다시 만들지 않는다.
+   *  - 새 항목: n 순 자리에 끼움 · 번호만 바뀐 항목: 글자만 고침
+   *  - 빠진 항목(실시간 공유에서 삭제·이동): 노드 제거 · 메모 등이 바뀐 항목: 그 노드만 새로 만듦
+   *  - 분류가 바뀐 항목: 다른 묶음으로 옮김 · 순서가 바뀐 항목: 노드를 옮김(새로 만들지 않음)
+   * 보던 위치는 화면 위쪽 1/3 지점 요소를 기준으로 그대로 둔다. 반환: {added, removed, updated} (전체 다시 그림이면 full)
+   */
+  function mergeShare(d) {
+    if ((d.allowDownload !== false) !== share.allowDownload || (d.showMemo !== false) !== share.showMemo || !idxWrap) {
+      // 보기 설정이 바뀜(드묾)·처음엔 비어 있던 공유 → 처음부터 다시 그린다
+      var y = window.scrollY;
+      var before = Object.keys(entries).length;
+      showShare(d, false);
+      window.scrollTo(0, y);
+      return { full: true, added: Math.max(0, share.items.length - before), removed: 0, updated: 0 };
+    }
+    if ((d.title || '') !== share.title) {
+      share.title = d.title || '';
+      if (titleEl) titleEl.textContent = share.title || 'Stash 공유';
+      document.title = share.title || 'Stash 공유';
+    }
+    share.expiresAt = d.expiresAt || null;
+
+    var incoming = (d.items || []).filter(function (x) { return x && typeof x === 'object'; });
+    if (!incoming.length && Object.keys(entries).length) {
+      // 전부 빠짐 → '항목 없음' 화면으로 다시 그린다
+      var gone = Object.keys(entries).length;
+      showShare(d, false);
+      return { full: true, added: 0, removed: gone, updated: 0 };
+    }
+
+    var anchor = captureAnchor();
+    var seen = {}, added = [], moved = [], rebuilt = [], removed = 0, regrouped = false;
+    incoming.forEach(function (raw) {
+      var key = itemKey(raw);
+      if (seen[key]) return;   // 같은 키가 두 번(있으면 안 됨) — 첫 것만
+      seen[key] = true;
+      var e = entries[key];
+      if (!e) { added.push(addEntry(raw)); return; }
+      var it = e.it;
+      var sigChanged = renderSig(it) !== renderSig(raw);
+      var numChanged = it.n !== raw.n || it.name !== raw.name;
+      var label = catLabel(raw);
+      // 같은 객체를 고쳐 쓴다 — 버튼·라이트박스 클로저가 들고 있는 it이 새 번호·이름·메모를 보게
+      for (var k in raw) if (Object.prototype.hasOwnProperty.call(raw, k)) it[k] = raw[k];
+      if (label !== e.g.label) { moveEntry(e, label); regrouped = true; }
+      if (sigChanged) rebuilt.push(e);
+      else if (numChanged) moved.push(e);
+    });
+    Object.keys(entries).forEach(function (k) {
+      if (!seen[k]) { removeEntry(entries[k]); removed++; }
+    });
+    if (!added.length && !moved.length && !rebuilt.length && !removed && !regrouped) {
+      refreshMeta();
+      return { added: 0, removed: 0, updated: 0 };
+    }
+
+    share.items = Object.keys(entries).map(function (k) { return entries[k].it; });
+    share.items.sort(function (a, b) { return (a.n || 0) - (b.n || 0); });
+    groups.forEach(function (g) { g.entries.sort(byN); });
+    dropEmptyGroups();
+    var relabelAll = false;
+    var w = calcPadW();
+    if (w !== padW) { padW = w; relabelAll = true; }
+    sortGroups();
+    ensureHeads();
+    (relabelAll ? Object.keys(entries).map(function (k) { return entries[k]; }) : moved).forEach(relabel);
+    rebuilt.forEach(rebuildEntry);
+    reorderDom();            // 붙어 있는 노드를 entries 순서로(새 항목을 끼우기 전에 — 끼울 자리 계산이 이 순서를 믿는다)
+    added.forEach(mountCell);
+    added.forEach(mountDet);
+    refreshMeta();
+    restoreAnchor(anchor);
+    return { added: added.length, removed: removed, updated: rebuilt.length };
+  }
+
+  /** 항목 하나를 화면·목록에서 뺀다(실시간 공유에서 보낸 사람이 지우거나 범위 밖으로 옮김) */
+  function removeEntry(e) {
+    if (e.cell && e.cell.parentNode) e.cell.parentNode.removeChild(e.cell);
+    if (e.det && e.det.parentNode) e.det.parentNode.removeChild(e.det);
+    var a = e.g.entries, i = a.indexOf(e);
+    if (i >= 0) a.splice(i, 1);
+    delete entries[e.key];
+    delete picked[e.key];
+    if (pendingScroll === e.key) pendingScroll = null;
+  }
+
+  /** 분류가 바뀐 항목 — 다른 묶음 목록으로 옮긴다(노드 위치는 reorderDom이 맞춤) */
+  function moveEntry(e, label) {
+    var a = e.g.entries, i = a.indexOf(e);
+    if (i >= 0) a.splice(i, 1);
+    var g = groupFor(label);
+    g.entries.push(e);
+    e.g = g;
+  }
+
+  /** 항목이 하나도 안 남은 분류 묶음 제거 */
+  function dropEmptyGroups() {
+    groups = groups.filter(function (g) {
+      if (g.entries.length) return true;
+      if (g.iw.parentNode) g.iw.parentNode.removeChild(g.iw);
+      if (g.dw.parentNode) g.dw.parentNode.removeChild(g.dw);
+      delete groupMap[g.label];
+      return false;
+    });
+  }
+
+  /** 메모 등이 바뀐 항목 — 썸네일·상세 노드를 새로 만들어 같은 자리에 바꿔 끼운다 */
+  function rebuildEntry(e) {
+    var oc = e.cell, od = e.det;
+    e.snipEl = e.fnameEl = e.imgEl = e.nEl = null;
+    if (oc) {
+      var nc = buildCell(e);
+      if (oc.parentNode) oc.parentNode.replaceChild(nc, oc);
+    }
+    if (od) {
+      var nd = buildDetail(e);
+      if (od.parentNode) od.parentNode.replaceChild(nd, od);
+    }
+  }
+
+  /** 붙어 있는 노드 순서를 묶음별 entries 순서에 맞춘다 — 제자리인 노드는 건드리지 않는다(대부분 0건) */
+  function reorderDom() {
+    groups.forEach(function (g) {
+      var prev = null;
+      g.entries.forEach(function (e) {
+        if (!e.cell) return;
+        var want = prev ? prev.nextSibling : g.grid.firstChild;
+        if (want !== e.cell) g.grid.insertBefore(e.cell, want);
+        prev = e.cell;
+      });
+      var prevD = g.dhead || null;
+      g.entries.forEach(function (e) {
+        if (!e.det) return;
+        var want = prevD ? prevD.nextSibling : g.dw.firstChild;
+        if (want !== e.det) g.dw.insertBefore(e.det, want);
+        prevD = e.det;
+      });
+    });
+  }
+
+  /** 지금 보고 있는 요소(화면 위쪽 1/3 지점)와 그 위치 */
+  function captureAnchor() {
+    if (window.scrollY < 2) return null;   // 맨 위(인덱스 보는 중)는 그대로
+    var x = Math.round(Math.min(window.innerWidth, document.documentElement.clientWidth || window.innerWidth) / 2);
+    var y = Math.round(window.innerHeight / 3);
+    var node = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+    var a = node && node.closest ? node.closest('.cell, section.item, .ghead, .dlbar, header.top') : null;
+    if (!a || !app.contains(a)) return null;
+    return { el: a, top: a.getBoundingClientRect().top };
+  }
+
+  /** 끼워 넣은 뒤 기준 요소가 밀린 만큼 되돌린다(브라우저 자체 스크롤 고정이 이미 맞췄으면 차이 0).
+   *  끼운 상세·썸네일은 한두 프레임 뒤에야 실제 높이가 정해지기도 해서(content-visibility 자리 높이 → 실제 높이)
+   *  잠깐(ANCHOR_HOLD_MS) 매 프레임 다시 맞춘다. 사용자가 스크롤·터치·키를 쓰면 바로 그만둔다. */
+  var ANCHOR_HOLD_MS = 1500;
+  var anchorHold = null;   // {el, top, until}
+  function restoreAnchor(an) {
+    if (!an || !an.el.isConnected) return;
+    var dy = an.el.getBoundingClientRect().top - an.top;
+    if (Math.abs(dy) >= 1) window.scrollBy(0, dy);
+    var first = !anchorHold;
+    anchorHold = { el: an.el, top: an.top, until: Date.now() + ANCHOR_HOLD_MS };
+    if (first) requestAnimationFrame(holdAnchorFrame);
+  }
+  function holdAnchorFrame() {
+    var h = anchorHold;
+    if (!h) return;
+    if (Date.now() > h.until || !h.el.isConnected) { anchorHold = null; return; }
+    var dy = h.el.getBoundingClientRect().top - h.top;
+    if (Math.abs(dy) >= 1) window.scrollBy(0, dy);
+    requestAnimationFrame(holdAnchorFrame);
+  }
+  function dropAnchorHold() { anchorHold = null; }
+  ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (t) {
+    window.addEventListener(t, dropAnchorHold, { passive: true, capture: true });
+  });
+
+  function buildGroupHead(g, inIndex) {
     var h = el('h2', inIndex ? 'ghead' : 'ghead dghead');
-    if (!inIndex) h.id = 'g-' + gi;
+    if (!inIndex) h.id = 'g-' + g.id;
     h.appendChild(el('span', 'gname', g.label));
-    h.appendChild(el('span', 'gcnt', g.items.length + '개'));
+    h.appendChild(el('span', 'gcnt', g.entries.length + '개'));
     if (inIndex) {
       var go = el('button', 'btn small glink', '상세 ↓');
       go.type = 'button';
       go.onclick = function () {
-        var t = document.getElementById('g-' + gi);
+        var t = document.getElementById('g-' + g.id);
         if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        else if (g.items[0]) { pendingScroll = g.items[0].n; }
+        else if (g.entries[0]) { pendingScroll = g.entries[0].key; }
       };
       h.appendChild(go);
       if (share.allowDownload) {
@@ -909,14 +1305,47 @@ var StashCrypto = (function () {
         lab.appendChild(cb);
         lab.appendChild(document.createTextNode('선택'));
         cb.onchange = function () {
-          g.items.forEach(function (it) { if (cb.checked) picked[it.n] = true; else delete picked[it.n]; });
+          g.entries.forEach(function (e) { if (cb.checked) picked[e.key] = true; else delete picked[e.key]; });
           syncPicks();
         };
-        groupBoxes.push({ cb: cb, items: g.items });
+        g.cb = cb;
         h.appendChild(lab);
       }
     }
     return h;
+  }
+
+  /* ── 업로드 중 막대 ── */
+
+  function buildUpbar() {
+    var b = el('div', 'upbar');
+    b.id = 'upbar';
+    b.setAttribute('role', 'status');
+    b.appendChild(el('div', 'uptext'));
+    var bar = el('div', 'bar');
+    bar.appendChild(el('i'));
+    b.appendChild(bar);
+    updateUpbar(b);
+    return b;
+  }
+
+  function updateUpbar(b) {
+    b = b || upbar;
+    if (!b || !live) return;
+    var done = live.uploaded, total = live.total;
+    var txt;
+    if (live.stalled) {
+      txt = '업로드가 멈춘 것 같습니다 — 지금까지 올라온 사진만 볼 수 있어요' + (total ? ' (' + done + ' / ' + total + ')' : '');
+    } else {
+      txt = '사진 올라오는 중… ' + (total ? done + ' / ' + total : done + '장') + ' (자동으로 추가됩니다)';
+    }
+    var t = b.querySelector('.uptext');
+    if (t.textContent !== txt) t.textContent = txt;
+    b.classList.toggle('stalled', !!live.stalled);
+    var fill = b.querySelector('.bar i');
+    var ratio = total ? Math.max(0, Math.min(1, done / total)) : 0;
+    fill.style.width = Math.round(ratio * 100) + '%';
+    b.querySelector('.bar').style.display = total ? '' : 'none';
   }
 
   /** 앱 안 브라우저(카카오톡 등)에서 외부 브라우저로 여는 주소. 없으면 null(메뉴 안내만). */
@@ -949,6 +1378,8 @@ var StashCrypto = (function () {
   }
 
   function zipAllLabel(order) {
+    // 업로드 중에는 '지금까지 올라온 것만' 묶인다는 걸 분명히
+    if (live) return '지금까지 올라온 ' + order.length + '장 ZIP';
     var total = sumSize(order);
     if (!total) return '전체 ZIP';
     var withFile = order.filter(function (it) { return it.fileId && it.kind !== 'text'; });
@@ -956,7 +1387,7 @@ var StashCrypto = (function () {
     return '전체 ZIP (' + fmtSize(total) + (n > 1 ? ' · ' + n + '개로 나눔' : '') + ')';
   }
 
-  function buildDlBar(order) {
+  function buildDlBar() {
     var frag = document.createDocumentFragment();
     if (IS_INAPP) {
       var hint = el('div', 'hint');
@@ -981,8 +1412,9 @@ var StashCrypto = (function () {
     all.id = 'pickAll';
     allLabel.appendChild(all);
     allLabel.appendChild(document.createTextNode('전체 선택'));
+    // 목록은 업로드 중 늘어나므로 누를 때의 share.order를 쓴다
     all.onchange = function () {
-      order.forEach(function (it) { if (all.checked) picked[it.n] = true; else delete picked[it.n]; });
+      share.order.forEach(function (it) { if (all.checked) picked[it._k] = true; else delete picked[it._k]; });
       syncPicks();
     };
     var selBtn = el('button', 'btn', '선택 ZIP');
@@ -990,12 +1422,12 @@ var StashCrypto = (function () {
     selBtn.id = 'zipSel';
     selBtn.disabled = true;
     selBtn.onclick = function () {
-      makeZip(order.filter(function (it) { return picked[it.n]; }), false);
+      makeZip(share.order.filter(function (it) { return picked[it._k]; }), false);
     };
-    var allBtn = el('button', 'btn primary', zipAllLabel(order));
+    var allBtn = el('button', 'btn primary', '전체 ZIP');
     allBtn.type = 'button';
     allBtn.id = 'zipAll';
-    allBtn.onclick = function () { makeZip(order, true); };
+    allBtn.onclick = function () { makeZip(share.order.slice(), true); };
     var st = el('div', 'dlstatus');
     st.id = 'dlstatus';
     bar.appendChild(allLabel);
@@ -1008,18 +1440,17 @@ var StashCrypto = (function () {
 
   function syncPicks() {
     var count = 0;
-    var items = share.items;
-    items.forEach(function (it) {
-      var on = !!picked[it.n];
+    Object.keys(entries).forEach(function (k) {
+      var e = entries[k];
+      var on = !!picked[k];
       if (on) count++;
-      var c = cells[it.n];
-      if (c) {
-        c.cell.classList.toggle('picked', on);
-        if (c.cb) c.cb.checked = on;
+      if (e.cell) {
+        e.cell.classList.toggle('picked', on);
+        if (e.cb) e.cb.checked = on;
       }
     });
-    groupBoxes.forEach(function (g) {
-      g.cb.checked = g.items.every(function (it) { return picked[it.n]; });
+    groups.forEach(function (g) {
+      if (g.cb) g.cb.checked = g.entries.length > 0 && g.entries.every(function (e) { return picked[e.key]; });
     });
     var sel = document.getElementById('zipSel');
     if (sel) {
@@ -1027,16 +1458,18 @@ var StashCrypto = (function () {
       sel.disabled = busy || !count;
     }
     var all = document.getElementById('pickAll');
-    if (all) all.checked = count > 0 && count === items.length;
+    if (all) all.checked = count > 0 && count === share.items.length;
   }
 
-  function scrollToItem(n) {
-    var target = document.getElementById('i-' + n);
+  function scrollToItem(it) {
+    var e = entries[it._k || itemKey(it)];
+    var target = e && e.det;
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    else pendingScroll = n;   // 아직 안 그려짐 — 그려지는 순간 이동
+    else if (e) pendingScroll = e.key;   // 아직 안 그려짐 — 그려지는 순간 이동
   }
 
-  function buildCell(it) {
+  function buildCell(e) {
+    var it = e.it;
     var cell = el('div', 'cell');
     cell.id = 'c-' + it.n;
     cell.tabIndex = 0;
@@ -1057,11 +1490,13 @@ var StashCrypto = (function () {
     } else {
       var ph2 = el('div', 'ph');
       ph2.appendChild(el('div', 'ico', '📄'));
-      ph2.appendChild(el('div', 'snip', displayName(it)));
+      e.snipEl = el('div', 'snip', displayName(it));
+      ph2.appendChild(e.snipEl);
       cell.appendChild(ph2);
     }
 
-    cell.appendChild(el('span', 'num', pad(it.n)));
+    e.numEl = el('span', 'num', pad(it.n));
+    cell.appendChild(e.numEl);
     if (share.showMemo && it.memo) {
       var dot = el('span', 'dot');
       dot.title = '메모 있음';
@@ -1073,22 +1508,23 @@ var StashCrypto = (function () {
       var pick = el('label', 'pick');
       cb = el('input');
       cb.type = 'checkbox';
-      cb.checked = !!picked[it.n];
+      cb.checked = !!picked[e.key];
       cb.setAttribute('aria-label', pad(it.n) + '번 선택');
       pick.appendChild(cb);
-      pick.onclick = function (e) { e.stopPropagation(); };
+      pick.onclick = function (ev) { ev.stopPropagation(); };
       cb.onchange = function () {
-        if (cb.checked) picked[it.n] = true; else delete picked[it.n];
+        if (cb.checked) picked[e.key] = true; else delete picked[e.key];
         syncPicks();
       };
       cell.appendChild(pick);
     }
-    if (picked[it.n]) cell.classList.add('picked');
-    cells[it.n] = { cell: cell, cb: cb };
+    if (picked[e.key]) cell.classList.add('picked');
+    e.cell = cell;
+    e.cb = cb;
 
-    var go = function () { scrollToItem(it.n); };
+    var go = function () { scrollToItem(it); };
     cell.onclick = go;
-    cell.onkeydown = function (e) { if (e.key === 'Enter') go(); };
+    cell.onkeydown = function (ev) { if (ev.key === 'Enter') go(); };
     return cell;
   }
 
@@ -1098,7 +1534,8 @@ var StashCrypto = (function () {
     return nm.replace(/^\d{3,4}_/, '') || '파일';
   }
 
-  function buildDetail(it) {
+  function buildDetail(e) {
+    var it = e.it;
     var sec = el('section', 'item');
     sec.id = 'i-' + it.n;
     var hasMedia = it.kind !== 'text' && !!it.fileId;
@@ -1113,12 +1550,14 @@ var StashCrypto = (function () {
         img.decoding = 'async';
         if (it.width && it.height) { img.width = it.width; img.height = it.height; }
         setImg(img, bigUrl(it.fileId), it.fileId, 1600);
-        img.onclick = function () { openLb(it.n); };
+        img.onclick = function () { openLb(it); };
+        e.imgEl = img;
         media.appendChild(img);
       } else {
         var fb = el('div', 'filebox');
         fb.appendChild(el('div', 'ico', '📄'));
-        fb.appendChild(el('div', 'fname', displayName(it)));
+        e.fnameEl = el('div', 'fname', displayName(it));
+        fb.appendChild(e.fnameEl);
         var fm = [it.mime, fmtSize(it.size)].filter(Boolean).join(' · ');
         if (fm) fb.appendChild(el('div', 'fmeta', fm));
         if (share.allowDownload) {
@@ -1134,7 +1573,8 @@ var StashCrypto = (function () {
     if (hasSide) {
       var side = el('div', 'side');
       var hd = el('div', 'head');
-      hd.appendChild(el('span', 'n', pad(it.n)));
+      e.nEl = el('span', 'n', pad(it.n));
+      hd.appendChild(e.nEl);
       hd.appendChild(el('span', 'date', it.createdAt || ''));
       side.appendChild(hd);
 
@@ -1167,8 +1607,301 @@ var StashCrypto = (function () {
     }
 
     if (!hasMedia || !hasSide) sec.classList.add('solo');
+    e.det = sec;
     return sec;
   }
+
+  /* ── 업로드 중 공유(uploading): 4초마다 m.json 다시 읽어 이어 붙이기 ──
+   * 보낸 사람 앱이 사진을 올리는 동안에도 링크가 바로 열린다. 올라온 만큼 보여 주고, 새로 온 항목은
+   * 화면을 다시 그리지 않고 끼워 넣는다(mergeShare). ready가 되면 번호를 맞추고(당겨질 수 있음) 멈춘다.
+   * 2분 동안 변화가 없으면 "멈춘 것 같습니다" + 30초 간격. 비밀번호 공유는 기억해 둔 키(dk)로 다시 푼다(다시 묻지 않음).
+   */
+  var POLL_MS = 4000;
+  var POLL_STALLED_MS = 30000;
+  var STALL_AFTER_MS = 2 * 60 * 1000;
+  var STALE_UPDATED_MS = 10 * 60 * 1000;   // 처음 열 때 서버 updatedAt이 이만큼 지났으면 바로 '멈춤'으로
+  var live = null;          // {total, uploaded, sig, lastChange, stalled, dk}
+  var pollTimer = null;
+
+  function startLive(env, dk, itemCount) {
+    var upd = Date.parse(env.updatedAt || '');
+    live = {
+      total: typeof env.total === 'number' && env.total > 0 ? env.total : null,
+      uploaded: typeof env.uploaded === 'number' ? env.uploaded : itemCount,
+      sig: '', lastChange: Date.now(), stalled: false, dk: dk || null
+    };
+    live.sig = live.uploaded + ':' + itemCount;
+    if (!isNaN(upd) && Date.now() - upd > STALE_UPDATED_MS) live.stalled = true;
+    schedulePoll();
+  }
+
+  function stopLive() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    live = null;
+  }
+
+  function schedulePoll(ms) {
+    clearTimeout(pollTimer);
+    if (!live) return;
+    pollTimer = setTimeout(poll, ms != null ? ms : (live.stalled ? POLL_STALLED_MS : POLL_MS));
+  }
+
+  function poll() {
+    if (!live) return;
+    // 탭이 안 보이면 쉰다 — 다시 보이면 바로 확인(visibilitychange)
+    if (document.hidden) { schedulePoll(); return; }
+    var myGen = gen, mid = MID;
+    fetchManifest(mid, true).then(function (r) {
+      if (myGen !== gen || !live) return;
+      if (r.kind === 'gone') { stopLive(); stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+      var env = r.env;
+      if (r.kind !== 'ok' || !env || typeof env !== 'object' || env.v !== 2) { noChange(); return; }   // 일시 문제 — 다음에 다시
+      if (env.status === 'gone') { stopLive(); stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+      if (isPast(env.expiresAt)) { stopLive(); expiredScreen(); return; }
+      if (env.status !== 'uploading' && env.status !== 'ready') { noChange(); return; }
+      var dataP;
+      if (env.enc) {
+        if (!live.dk) {
+          // 보내는 중에 비밀번호가 새로 걸림(평문으로 보던 중) → 처음부터(비밀번호 화면)
+          stopLive();
+          openV2(false);
+          return;
+        }
+        if (!encOk(env)) { noChange(); return; }
+        dataP = StashCrypto.decrypt(env, live.dk);
+      } else {
+        dataP = Promise.resolve(env.data);
+      }
+      dataP.then(function (data) {
+        if (myGen !== gen || !live) return;
+        applyLive(env, data);
+      }, function (e) {
+        if (myGen !== gen || !live) return;
+        if (e && e.code === 'mac') {
+          // 보내는 중에 비밀번호가 바뀜 → 처음부터(비밀번호 다시 묻기)
+          stopLive();
+          storeDel('stash_dk_' + mid);
+          openV2(false);
+          return;
+        }
+        noChange();
+      });
+    }, function () {
+      if (myGen === gen && live) noChange();
+    });
+  }
+
+  function noChange() {
+    if (!live) return;
+    if (!live.stalled && Date.now() - live.lastChange > STALL_AFTER_MS) { live.stalled = true; updateUpbar(); }
+    schedulePoll();
+  }
+
+  function applyLive(env, data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.items)) { noChange(); return; }
+    // 처음 그리기가 아직 덜 끝났으면(항목 많을 때 프레임 나눠 그림) 조금 뒤 다시
+    if (share && !document.body.hasAttribute('data-rendered')) {
+      var myGen = gen;
+      setTimeout(function () { if (myGen === gen && live) applyLive(env, data); }, 200);
+      return;
+    }
+    var ready = env.status === 'ready';
+    var count = data.items.length;
+    if (!ready) {
+      live.total = typeof env.total === 'number' && env.total > 0 ? env.total : live.total;
+      live.uploaded = typeof env.uploaded === 'number' ? env.uploaded : count;
+      var sig = live.uploaded + ':' + count;
+      if (sig !== live.sig) { live.sig = sig; live.lastChange = Date.now(); live.stalled = false; }
+      else if (Date.now() - live.lastChange > STALL_AFTER_MS) live.stalled = true;
+    }
+    if (!share) {
+      // 아직 한 장도 없어 '준비 중' 화면이었음 → 이제 처음 그린다
+      // ready면 0장이어도 그린다(render가 '공유된 항목이 없습니다' 처리) — 계속 폴링하지 않게
+      if (ready) {
+        var dk0 = live.dk;
+        stopLive();
+        syncOn = !!env.live;
+        showShare(data, false);
+        if (syncOn) startWatch(env, dk0);   // 실시간 공유 — 이제부터는 바뀔 때만 다시 읽는다
+        return;
+      }
+      if (count) showShare(data, false);
+      if (live) schedulePoll();
+      return;
+    }
+    if (ready) {
+      var dk1 = live.dk;
+      stopLive();                       // zipAllLabel·막대가 ready 기준이 되도록 먼저
+      share.live = false;
+      syncOn = !!env.live;
+      share.sync = syncOn;
+      mergeShare(data);
+      if (upbar) { var anchor = captureAnchor(); upbar.remove(); upbar = null; restoreAnchor(anchor); }
+      ensureLiveBadge();
+      toast('사진이 모두 올라왔습니다');
+      if (syncOn) startWatch(env, dk1);
+      return;
+    }
+    mergeShare(data);
+    updateUpbar();
+    schedulePoll();
+  }
+
+  /* ── 실시간 공유(ready + 봉투 live): 열어 둔 채로 바뀐 것만 반영 ──
+   * 보낸 사람 PC의 Stash가 그 모델·카테고리에 항목을 추가·삭제·이동하거나 메모를 고치면 m.json이 다시 써진다.
+   * 20초마다(탭이 보일 때만) Drive 메타데이터(version — 몇백 바이트)만 확인하고, 바뀌었을 때만 m.json을 받아 합친다.
+   * 30분 넘게 변화가 없으면 60초 간격. 메타데이터를 못 읽는 환경이면 m.json을 60초마다 직접 받는다.
+   * 비밀번호 공유는 처음 입력으로 얻은 키(dk)로 다시 푼다. 보낸 사람이 실시간을 끄면 지금 내용 그대로 멈춘다.
+   */
+  var WATCH_MS = 20000;
+  var WATCH_IDLE_MS = 60000;
+  var WATCH_IDLE_AFTER_MS = 30 * 60 * 1000;
+  var watch = null;        // {ver, dk, metaOk, lastChange, syncedAt}
+  var watchTimer = null;
+
+  function startWatch(env, dk) {
+    stopWatch();
+    watch = { ver: '', dk: dk || null, metaOk: true, lastChange: Date.now(), syncedAt: (env && env.syncedAt) || null };
+    if (share) share.sync = true;
+    ensureLiveBadge();
+    scheduleWatch();
+  }
+
+  function stopWatch() {
+    clearTimeout(watchTimer);
+    watchTimer = null;
+    watch = null;
+  }
+
+  function scheduleWatch(ms) {
+    clearTimeout(watchTimer);
+    if (!watch) return;
+    var slow = !watch.metaOk || Date.now() - watch.lastChange > WATCH_IDLE_AFTER_MS;
+    watchTimer = setTimeout(watchTick, ms != null ? ms : (slow ? WATCH_IDLE_MS : WATCH_MS));
+  }
+
+  /** m.json 메타데이터만 → {ver} | {gone:true} | {retry:true}(일시 오류) | {nometa:true}(이 방법을 못 씀) */
+  function fetchMeta(mid) {
+    var url = DRIVE_FILES + encodeURIComponent(mid) + '?fields=version%2CmodifiedTime&key=' + encodeURIComponent(DRIVE_API_KEY) + '&_=' + Date.now();
+    var ctl = window.AbortController ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : null;
+    return fetch(url, { credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined }).then(function (res) {
+      if (timer) clearTimeout(timer);
+      if (res.ok) {
+        return res.json().then(function (j) {
+          var v = j && (j.version || j.modifiedTime) ? String(j.version || '') + '|' + String(j.modifiedTime || '') : '';
+          return v ? { ver: v } : { nometa: true };
+        }, function () { return { nometa: true }; });
+      }
+      return errInfo(res).then(function (why) {
+        if (res.status === 404 || res.status === 410 || (res.status === 403 && GONE_REASONS.test(why))) return { gone: true };
+        if (res.status === 429 || res.status >= 500 || RATE_REASONS.test(why)) return { retry: true };
+        return { nometa: true };
+      });
+    }, function () {
+      if (timer) clearTimeout(timer);
+      return { retry: true };
+    });
+  }
+
+  function watchTick() {
+    if (!watch) return;
+    if (document.hidden) { scheduleWatch(); return; }   // 다시 보이면 visibilitychange가 바로 확인
+    var myGen = gen, mid = MID;
+    var metaP = watch.metaOk ? fetchMeta(mid) : Promise.resolve({ nometa: true });
+    metaP.then(function (m) {
+      if (myGen !== gen || !watch) return;
+      if (m.gone) { stopWatch(); stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+      if (m.retry) { scheduleWatch(); return; }
+      if (m.nometa) watch.metaOk = false;
+      else if (m.ver === watch.ver) { scheduleWatch(); return; }   // 그대로 — m.json을 받지 않는다
+      return fetchManifest(mid, true).then(function (r) {
+        if (myGen !== gen || !watch) return;
+        if (r.kind === 'gone') { stopWatch(); stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+        var env = r.env;
+        if (r.kind !== 'ok' || !env || typeof env !== 'object' || env.v !== 2) { scheduleWatch(); return; }
+        if (env.status === 'gone') { stopWatch(); stateScreen('만료되었거나 삭제된 링크입니다', '필요하면 보내준 사람에게 다시 요청하세요.'); return; }
+        if (isPast(env.expiresAt)) { stopWatch(); expiredScreen(); return; }
+        if (env.status !== 'ready') { scheduleWatch(); return; }
+        var dataP;
+        if (env.enc) {
+          if (!watch.dk) { stopWatch(); openV2(false); return; }   // 보던 중에 비밀번호가 새로 걸림 → 비밀번호 화면
+          if (!encOk(env)) { scheduleWatch(); return; }
+          dataP = StashCrypto.decrypt(env, watch.dk);
+        } else {
+          dataP = Promise.resolve(env.data);
+        }
+        return dataP.then(function (data) {
+          if (myGen !== gen || !watch) return;
+          if (m.ver) watch.ver = m.ver;
+          applyWatch(env, data);
+        }, function (e) {
+          if (myGen !== gen || !watch) return;
+          if (e && e.code === 'mac') {   // 비밀번호가 바뀜 → 처음부터 다시 묻기
+            stopWatch();
+            storeDel('stash_dk_' + mid);
+            openV2(false);
+            return;
+          }
+          scheduleWatch();
+        });
+      });
+    }).catch(function () {
+      if (myGen === gen && watch) scheduleWatch();
+    });
+  }
+
+  function applyWatch(env, data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.items) || !share) { scheduleWatch(); return; }
+    // 처음 그리기가 아직 덜 끝났으면(항목 많을 때 프레임 나눠 그림) 조금 뒤 다시
+    if (!document.body.hasAttribute('data-rendered')) {
+      var myGen = gen;
+      setTimeout(function () { if (myGen === gen && watch) applyWatch(env, data); }, 200);
+      return;
+    }
+    if (isPast(data.expiresAt)) { stopWatch(); expiredScreen(); return; }
+    var still = !!env.live;
+    if (env.syncedAt) watch.syncedAt = env.syncedAt;
+    syncOn = still;
+    var res = mergeShare(data);
+    share.sync = still;
+    ensureLiveBadge();
+    if (res && (res.added || res.removed || res.updated)) {
+      watch.lastChange = Date.now();
+      var parts = [];
+      if (res.added) parts.push('새 항목 ' + res.added + '개 추가');
+      if (res.removed) parts.push(res.removed + '개 빠짐');
+      if (res.updated) parts.push(res.updated + '개 내용 바뀜');
+      toast(parts.join(' · '));
+    }
+    if (!still) { stopWatch(); return; }   // 보낸 사람이 실시간을 끔 — 지금 내용 그대로
+    scheduleWatch();
+  }
+
+  /** 머리말의 '실시간 공유' 표시 — share.sync일 때만. 마지막 업데이트 시각을 같이 */
+  function ensureLiveBadge() {
+    if (!share || !headEl) return;
+    if (!share.sync) {
+      if (liveEl) { liveEl.remove(); liveEl = null; }
+      return;
+    }
+    if (!liveEl) {
+      liveEl = el('div', 'livebadge');
+      headEl.appendChild(liveEl);
+    }
+    clear(liveEl);
+    liveEl.appendChild(el('i'));
+    var at = watch && watch.syncedAt ? fmtStamp(watch.syncedAt) : '';
+    liveEl.appendChild(document.createTextNode('실시간 공유 · 새로 추가되는 항목이 자동으로 나타납니다' + (at ? ' · ' + at + ' 업데이트' : '')));
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) return;
+    if (live) schedulePoll(0);
+    else if (watch) scheduleWatch(0);
+    else if (retryTimer && MODE === 'v2' && !share) { clearTimeout(retryTimer); retryTimer = null; openV2(true); }
+  });
 
   /** 검증 수준 → 안내 문구 */
   var LEVEL_TEXT = { hash: '원본 일치(SHA-256) 확인', size: '크기만 확인(해시 정보 없음)', none: '확인 정보 없음(검증 안 됨)' };
@@ -1342,8 +2075,9 @@ var StashCrypto = (function () {
   var lb = document.getElementById('lb');
   var lbImg = document.getElementById('lbimg');
 
-  function openLb(n) {
-    for (var i = 0; i < lbList.length; i++) if (lbList[i].n === n) { lbPos = i; break; }
+  function openLb(it) {
+    var p = lbList.indexOf(it);
+    if (p >= 0) lbPos = p;
     showLb();
     lb.classList.add('open');
     document.body.style.overflow = 'hidden';
@@ -1353,7 +2087,12 @@ var StashCrypto = (function () {
     if (!it) return;
     lbImg.removeAttribute('src');
     setImg(lbImg, fullUrl(it.fileId), it.fileId, 2400);
-    document.getElementById('lbcount').textContent = pad(it.n) + '  ·  ' + (lbPos + 1) + ' / ' + lbList.length;
+    updateLbCount();
+  }
+  /** 위치 글자만 — 업로드 중 목록이 늘어도 보던 사진은 다시 안 불러온다 */
+  function updateLbCount() {
+    var it = lbList[lbPos];
+    if (it) document.getElementById('lbcount').textContent = pad(it.n) + '  ·  ' + (lbPos + 1) + ' / ' + lbList.length;
   }
   function moveLb(d) {
     if (lbList.length < 2) return;
@@ -1440,6 +2179,7 @@ var StashCrypto = (function () {
       return;
     }
     setBusy(true);
+    list = list.map(function (it) { return Object.assign({}, it); });
     var withFile = list.filter(function (it) { return it.fileId && it.kind !== 'text'; });
     var parts = zipParts(withFile);
     var failed = [];     // 받지 못함
@@ -1617,9 +2357,15 @@ var StashCrypto = (function () {
   function start() {
     var r = readId();
     if (lb.classList.contains('open')) closeLb();
-    gen++;   // 진행 중인 열기·ZIP·자동 재확인 결과는 이제 무시된다
+    gen++;   // 진행 중인 열기·ZIP·자동 재확인·업로드 중 다시 읽기 결과는 이제 무시된다
+    anchorHold = null;
     clearTimeout(retryTimer);
-    share = null; token = null; picked = {}; cells = {}; groupBoxes = []; lbList = []; busy = false; pendingScroll = null;
+    retryTimer = null; buildSince = 0;
+    stopLive();
+    stopWatch();
+    share = null; token = null; picked = {}; entries = {}; groups = []; groupMap = {}; lbList = []; busy = false; pendingScroll = null;
+    idxWrap = null; detWrap = null; hdrSub = null; titleEl = null; upbar = null; padW = 3;
+    headEl = null; liveEl = null; syncOn = false;
     document.title = 'Stash 공유';
     document.body.removeAttribute('data-rendered');   // 다 그려졌는지 표시(테스트·자동화용) — 새 공유는 처음부터
     window.scrollTo(0, 0);

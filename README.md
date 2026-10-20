@@ -3,6 +3,8 @@
 - 받는 사람이 여는 공유 링크 화면입니다.
   - 새 링크(v2): `https://bizforbiz.github.io/s/#<m.json 파일 ID>` — 공유 목록(`m.json`)과 원본을 Google Drive API에서 **직접** 읽습니다(Apps Script 안 거침).
   - 옛 링크(v1): `https://bizforbiz.github.io/s/#<공유ID 10자>` — Apps Script 서버(`share-server/Code.gs`의 `vOpen`/`vFile`)에서 받습니다.
+  - 실시간 공유(v3): 보낸 사람이 모델·카테고리를 통째로 공유한 링크. 열어 둔 채로 20초마다 `m.json`의 Drive 버전만 확인하고,
+    바뀌었을 때만 다시 읽어 새 항목 추가·빠진 항목 제거·메모 변경을 화면에 반영합니다(`share-server/CONTRACT.md` §4.2).
 - GitHub 저장소 `bizforbiz/s`는 **공개**이며 이 `index.html` 하나만 들어 있습니다. 공유 내용·사진은 없습니다.
   들어 있는 것은 서버 주소(`API_URL`)와 Drive API 키(`DRIVE_API_KEY` — 웹사이트·Drive API로 제한한 공개용 키, `share-server/SETUP.md` 7번)뿐입니다.
 - 업데이트: 이 폴더의 `index.html`을 `bizforbiz/s` 저장소 루트에 그대로 복사 → `DRIVE_API_KEY` 값이 들어 있는지 확인 → 커밋 → push (GitHub Pages가 1~2분 뒤 자동 반영).
