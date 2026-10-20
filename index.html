@@ -396,9 +396,15 @@ var StashCrypto = (function () {
 
   // Stash 공유 서버(Apps Script 웹앱 /exec). 배포 주소가 바뀌면 여기만 고친다. (옛 링크 vOpen/vFile·열람수 vPing)
   var API_URL = 'https://script.google.com/macros/s/AKfycbxvFvuB0KAovb436Je0oa8GHBb_i7sbnfUE5Na1cSNyAgHAtRNK0wK7Bd1bIPnctEVjag/exec';
-  // Google Drive API 키(공개 파일 읽기 전용) — v2 링크(#<m.json ID>)와 원본 받기에 쓴다. SETUP.md 7번 참고.
-  // GCP 콘솔에서 'Google Drive API'만 허용 + HTTP 리퍼러 https://bizforbiz.github.io/* 로 제한해서 넣는다.
-  var DRIVE_API_KEY = 'AIzaSyAK-yPss5VFI5CThSQVoAx9-Gie26UKEa0';
+  // Google Drive API 키(공개 파일 읽기 전용) — v2 링크와 원본 받기에 쓴다. 'Google Drive API'만 허용하고 HTTP 리퍼러를 사이트로
+  // 제한한 공개용 키라 사이트마다 따로다: bizforbiz.github.io = GCP dadabase-328713(Stash 계정),
+  // stash-link.web.app·stash-link.firebaseapp.com = GCP stash-link-20261020(Firebase Hosting, 2026-10-20 — 링크에 github가 안 보이게).
+  var DRIVE_API_KEYS = {
+    'bizforbiz.github.io': 'AIzaSyAK-yPss5VFI5CThSQVoAx9-Gie26UKEa0',
+    'stash-link.web.app': 'AIzaSyA_6DdurZC1Wi_lb5NdRVvNDGt-FhVdU2Q',
+    'stash-link.firebaseapp.com': 'AIzaSyA_6DdurZC1Wi_lb5NdRVvNDGt-FhVdU2Q'
+  };
+  var DRIVE_API_KEY = DRIVE_API_KEYS[location.hostname] || DRIVE_API_KEYS['stash-link.web.app'];
   var DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files/';
   var ID_RE = /^[A-Za-z0-9]{10}$/;            // 옛 링크: shareId(10자)
   var MID_RE = /^[A-Za-z0-9_-]{25,60}$/;      // v2 링크: m.json 파일 ID
@@ -412,6 +418,7 @@ var StashCrypto = (function () {
   var KEY_OK = /^[A-Za-z0-9_-]{20,}$/.test(DRIVE_API_KEY) && DRIVE_API_KEY.indexOf('REPLACE_') !== 0;
 
   var MODE = '';           // 'v1' | 'v2'
+  var SHORT_ID = '';       // 짧은 링크(/<shareId>)로 열었으면 그 shareId — vResolve로 m.json ID를 받아 v2로 연다
   var SHARE_ID = '';       // v1 shareId
   var MID = '';            // v2 m.json ID
   var TOKEN_KEY = '';
@@ -2798,7 +2805,7 @@ var StashCrypto = (function () {
 
   /* ── 시작 ── */
 
-  /** 주소 → {mode, id}. #<m.json ID>(v2) · #<shareId>(옛) · ?s=<shareId>(옛) */
+  /** 주소 → {mode, id}. /<shareId>(짧은 링크) · #<m.json ID>(v2) · #<shareId>(옛) · ?s=<shareId>(옛) */
   function readId() {
     var h = (location.hash || '').replace(/^#/, '');
     try { h = decodeURIComponent(h); } catch (e) { /* 그대로 */ }
@@ -2807,10 +2814,45 @@ var StashCrypto = (function () {
     if (MID_RE.test(h)) return { mode: 'v2', id: h };
     var m = /[?&]s=([^&#]*)/.exec(location.search || '');
     var q = m ? m[1] : '';
-    return ID_RE.test(q) ? { mode: 'v1', id: q } : { mode: '', id: '' };
+    if (ID_RE.test(q)) return { mode: 'v1', id: q };
+    var pm = /^\/([A-Za-z0-9]{10})\/?$/.exec(location.pathname || '');
+    return pm ? { mode: 'short', id: pm[1] } : { mode: '', id: '' };
   }
 
-  function curKey() { return MODE + ':' + (MODE === 'v2' ? MID : SHARE_ID); }
+  function curKey() { return SHORT_ID ? 'short:' + SHORT_ID : MODE + ':' + (MODE === 'v2' ? MID : SHARE_ID); }
+
+  function localGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+  function localSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* 저장 불가 환경 무시 */ } }
+
+  /**
+   * 짧은 링크(/<shareId>) — 서버(vResolve)에 m.json ID를 물어 v2로 연다. 찾은 ID는 이 브라우저에 기억해 다음엔 서버를 안 거친다
+   * (지운 공유면 m.json이 '없어짐'으로 바뀌어 있어 그대로 안내된다).
+   */
+  function openShort(sid) {
+    var myGen = gen, k = 'stash_mid_' + sid;
+    var known = localGet(k);
+    if (known && MID_RE.test(known)) {
+      MODE = 'v2'; MID = known;
+      openV2(false);
+      return;
+    }
+    loading();
+    api('vResolve', { s: sid }).then(function (j) {
+      if (myGen !== gen) return;
+      if (j.ok && typeof j.mid === 'string' && MID_RE.test(j.mid)) {
+        localSet(k, j.mid);
+        MODE = 'v2'; MID = j.mid;
+        openV2(false);
+      } else if (j.code === 'notFound') {
+        stateScreen('없는 링크입니다', '공유가 삭제되었거나 주소가 틀렸습니다. 보내준 사람에게 확인해 주세요.');
+      } else {
+        stateScreen('불러오지 못했습니다', '잠시 후 다시 시도해 주세요.', '다시 시도', function () { openShort(sid); });
+      }
+    }, function () {
+      if (myGen !== gen) return;
+      stateScreen('불러오지 못했습니다', '잠시 후 다시 시도해 주세요.', '다시 시도', function () { openShort(sid); });
+    });
+  }
 
   function start() {
     var r = readId();
@@ -2828,7 +2870,12 @@ var StashCrypto = (function () {
     document.title = 'Stash 공유';
     document.body.removeAttribute('data-rendered');   // 다 그려졌는지 표시(테스트·자동화용) — 새 공유는 처음부터
     window.scrollTo(0, 0);
-    MODE = r.mode; SHARE_ID = ''; MID = ''; TOKEN_KEY = '';
+    MODE = r.mode; SHARE_ID = ''; MID = ''; TOKEN_KEY = ''; SHORT_ID = '';
+    if (r.mode === 'short') {
+      SHORT_ID = r.id;
+      openShort(r.id);
+      return;
+    }
     if (r.mode === 'v2') {
       MID = r.id;
       openV2(false);
