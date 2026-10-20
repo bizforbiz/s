@@ -113,11 +113,17 @@
 
   /* 다운로드 */
   .dlbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .dlbar label { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); cursor: pointer; margin-right: 4px; }
-  .dlbar input, .ghead input { accent-color: var(--accent); width: 15px; height: 15px; }
-  .dlstatus { flex-basis: 100%; font-size: 12px; color: var(--dim); }
+  .dlbar .tip { color: var(--mute); font-size: 12px; }
+  /* 받기 진행·결과 — 아래에 떠 있는 알림(스크롤해도 보임) */
+  .dlstatus {
+    position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%); z-index: 12;
+    width: min(560px, calc(100vw - 24px)); padding: 10px 14px; border-radius: 10px;
+    background: #20242c; border: 1px solid var(--line-h); box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+    font-size: 12px; color: var(--dim);
+  }
   .dlstatus:empty { display: none; }
-  .dlstatus .bar { height: 4px; background: var(--line-2); border-radius: 2px; overflow: hidden; margin: 6px 0 2px; max-width: 520px; }
+  .dlstatus .x { float: right; margin: -4px -6px 0 8px; border: 0; background: transparent; color: var(--mute); font-size: 16px; cursor: pointer; }
+  .dlstatus .bar { height: 4px; background: var(--line-2); border-radius: 2px; overflow: hidden; margin: 6px 0 2px; }
   .dlstatus .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
   .dlstatus .err, .links .err { margin-top: 4px; min-height: 0; }
   .dlstatus .zipsave { color: var(--accent); font-weight: 700; }
@@ -136,7 +142,6 @@
   .ghead .gdot.uncat { background: var(--uncat); }
   .ghead .gname { overflow-wrap: anywhere; }
   .ghead .gcnt { color: var(--mute); font-weight: 500; font-size: 13px; margin-right: auto; white-space: nowrap; }
-  .ghead .gpick { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--dim); cursor: pointer; }
 
   /* 마소너리 — 폭=열 너비, 높이=사진 비율(앱과 같이 0.5~2배로 제한) + 아래 이름·크기 */
   .mgrid { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); grid-auto-rows: 4px; column-gap: 14px; }
@@ -144,22 +149,30 @@
     position: relative; margin-bottom: 14px; display: flex; flex-direction: column; overflow: hidden; cursor: pointer;
     background: var(--card); border: 1px solid var(--line); border-radius: 10px; outline: none;
   }
+  .card { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
   .card:hover { border-color: var(--line-h); }
+  .card.cur { border-color: #56657d; }
   .card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card.sel .ib::after { content: ""; position: absolute; inset: 0; background: rgba(59, 158, 255, .14); pointer-events: none; }
   .card:focus-visible { border-color: var(--accent); }
+  .gallery { user-select: none; -webkit-user-select: none; }
+  /* 빈 곳을 끌어 여러 장 고르기(앱의 박스 선택) */
+  .rubber { position: absolute; z-index: 9; border: 1px solid var(--accent); background: rgba(59, 158, 255, .14); border-radius: 2px; pointer-events: none; }
+  /* 여러 장 골랐을 때 아래에 떠 있는 막대 */
+  .selbar {
+    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 12;
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 16px; border-radius: 999px;
+    background: #20242c; border: 1px solid var(--line-h); box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+    font-size: 13px; white-space: nowrap; max-width: calc(100vw - 24px);
+  }
+  .selbar[hidden] { display: none; }
+  .selbar .cnt { color: var(--text); font-weight: 700; margin-right: 4px; }
   .card .ib { position: relative; flex: none; background: var(--img); display: flex; align-items: center; justify-content: center; overflow: hidden; }
   .card .ib img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .card .num {
     position: absolute; left: 7px; top: 7px; z-index: 1; padding: 0 6px; border-radius: 4px;
     background: rgba(0, 0, 0, .6); color: #fff; font: 700 11px/18px var(--mono);
   }
-  .card .pick {
-    position: absolute; right: 6px; top: 6px; z-index: 1; width: 28px; height: 28px; border-radius: 7px; cursor: pointer;
-    background: rgba(0, 0, 0, .45); border: 1px solid rgba(255, 255, 255, .3);
-    display: flex; align-items: center; justify-content: center;
-  }
-  .card .pick input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
-  .card.picked .pick { background: var(--accent); border-color: var(--accent); }
   .card .lbl { height: 46px; flex: none; padding: 6px 10px 0; min-width: 0; }
   .card .nm { color: var(--text-2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card .dm { color: var(--mute); font: 11px/18px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -187,7 +200,7 @@
     background: var(--img); border-radius: 8px; min-height: 160px; overflow: hidden; cursor: zoom-in;
     display: flex; align-items: center; justify-content: center; touch-action: pan-y pinch-zoom;
   }
-  .panel .pv img { max-width: 100%; max-height: 52vh; display: block; }
+  .panel .pv img { width: auto; height: auto; max-width: 100%; max-height: 52vh; display: block; object-fit: contain; }
   .panel .phead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 12px 0 2px; }
   .panel .pn { font: 700 15px var(--mono); }
   .panel .pdate { color: var(--mute); font-size: 12px; }
@@ -201,6 +214,7 @@
   .panel .memo.empty { color: var(--mute); }
   .panel .pmeta { color: var(--mute); font-size: 12px; margin-top: 12px; overflow-wrap: anywhere; }
   .panel .pempty { color: var(--mute); text-align: center; padding: 48px 10px; }
+  .panel .pmulti { color: var(--accent); font-size: 12px; font-weight: 700; margin: 0 0 10px; }
   .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
   .links .src { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
   .links .direct { font-size: 12px; }
@@ -214,7 +228,7 @@
   .filebox .fmeta { color: var(--mute); font-size: 12px; }
 
   .totop {
-    position: fixed; right: 14px; bottom: 16px; z-index: 5; padding: 9px 13px; border-radius: 20px;
+    position: fixed; right: 14px; bottom: 70px; z-index: 5; padding: 9px 13px; border-radius: 20px;
     background: var(--accent); color: #fff; border: 0; font-size: 13px; cursor: pointer; opacity: 0; pointer-events: none;
     transition: opacity .2s; box-shadow: 0 2px 10px rgba(0, 0, 0, .4);
   }
@@ -1055,6 +1069,9 @@ var StashCrypto = (function () {
     main.appendChild(galWrap);
     main.appendChild(panelEl);
     app.appendChild(main);
+    app.appendChild(buildFloating());
+    initRubber(galWrap);
+    anchorKey = null;
     measureCols();
 
     var added = share.items.map(addEntry);
@@ -1188,7 +1205,6 @@ var StashCrypto = (function () {
     if (e.cell) {
       e.cell.setAttribute('aria-label', p + '번 ' + cardName(it));
       if (e.numEl && e.numEl.textContent !== p) e.numEl.textContent = p;
-      if (e.cb) e.cb.setAttribute('aria-label', p + '번 선택');
       if (e.fnEl) e.fnEl.textContent = displayName(it);
     }
     if (e.key === selKey) renderPanel();
@@ -1282,6 +1298,7 @@ var StashCrypto = (function () {
     if (i >= 0) a.splice(i, 1);
     delete entries[e.key];
     delete picked[e.key];
+    if (anchorKey === e.key) anchorKey = null;
     if (pendingScroll === e.key) pendingScroll = null;
   }
 
@@ -1373,20 +1390,6 @@ var StashCrypto = (function () {
     h.appendChild(dot);
     h.appendChild(el('span', 'gname', g.label));
     h.appendChild(el('span', 'gcnt', '· ' + g.entries.length));
-    if (share.allowDownload) {
-      var lab = el('label', 'gpick');
-      var cb = el('input');
-      cb.type = 'checkbox';
-      cb.setAttribute('aria-label', g.label + ' 전체 선택');
-      lab.appendChild(cb);
-      lab.appendChild(document.createTextNode('선택'));
-      cb.onchange = function () {
-        g.entries.forEach(function (e) { if (cb.checked) picked[e.key] = true; else delete picked[e.key]; });
-        syncPicks();
-      };
-      g.cb = cb;
-      h.appendChild(lab);
-    }
     return h;
   }
 
@@ -1404,10 +1407,10 @@ var StashCrypto = (function () {
     opts = opts || {};
     var e = entries[key];
     if (!e) return;
-    if (selKey && entries[selKey] && entries[selKey].cell) entries[selKey].cell.classList.remove('sel');
+    if (selKey && entries[selKey] && entries[selKey].cell) entries[selKey].cell.classList.remove('cur');
     selKey = key;
     rememberSelIndex();
-    if (e.cell) e.cell.classList.add('sel');
+    if (e.cell) e.cell.classList.add('cur');
     renderPanel();
     if (opts.open && narrow()) openSheet();
     if (opts.scroll) {
@@ -1499,6 +1502,10 @@ var StashCrypto = (function () {
     nav.appendChild(el('span', 'ppos', selPosText()));
     nav.appendChild(next);
     panelEl.appendChild(nav);
+    var pm = el('div', 'pmulti');
+    pm.hidden = pickCount() < 2;
+    pm.textContent = pickCount() + '개 선택됨' + (share.allowDownload ? ' — 아래 "선택 ZIP"으로 한 번에 받기' : '');
+    panelEl.appendChild(pm);
 
     if (!e) {
       panelEl.appendChild(el('div', 'pempty', '항목을 누르면 여기에 크게 보입니다'));
@@ -1589,15 +1596,37 @@ var StashCrypto = (function () {
     }, { passive: true });
   }
 
-  // 키보드: ←/→ 앞뒤 항목, Enter 크게 보기, Esc 전체 화면 상세 닫기 (라이트박스가 열려 있으면 라이트박스가 처리)
+  // 키보드(앱과 같게): ←/→/↑/↓ 옮기기(Shift = 범위로 고르기) · Home/End · Ctrl+A 전체 · Esc 해제(전체 화면 상세면 닫기) · Enter 크게 보기.
+  // 라이트박스가 열려 있으면 라이트박스가 처리한다.
   document.addEventListener('keydown', function (ev) {
-    if (lb.classList.contains('open') || !share || !panelEl || !selKey) return;
+    if (lb.classList.contains('open') || !share || !panelEl) return;
     var t = ev.target;
-    if (t && /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) && ev.key !== 'Escape') return;
-    if (ev.key === 'ArrowRight') { ev.preventDefault(); stepSel(1); }
-    else if (ev.key === 'ArrowLeft') { ev.preventDefault(); stepSel(-1); }
-    else if (ev.key === 'Escape' && panelEl.classList.contains('open')) closeSheet();
-    else if (ev.key === 'Enter' && entries[selKey] && isImage(entries[selKey].it) && !(t && t.classList && t.classList.contains('card'))) openLb(entries[selKey].it);
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    var k = null;
+    if (ev.key === 'ArrowRight') k = orderNeighbor(1);
+    else if (ev.key === 'ArrowLeft') k = orderNeighbor(-1);
+    else if (ev.key === 'ArrowDown') k = narrow() ? orderNeighbor(1) : (verticalNeighbor(1) || orderNeighbor(1));
+    else if (ev.key === 'ArrowUp') k = narrow() ? orderNeighbor(-1) : (verticalNeighbor(-1) || orderNeighbor(-1));
+    else if (ev.key === 'Home') k = share.order.length ? share.order[0]._k : null;
+    else if (ev.key === 'End') k = share.order.length ? share.order[share.order.length - 1]._k : null;
+    if (k) {
+      ev.preventDefault();
+      if (ev.shiftKey) selectRange(anchorKey && entries[anchorKey] ? anchorKey : (selKey || k), k, ev.ctrlKey || ev.metaKey);
+      else pickOnly(k);
+      selectItem(k, { scroll: true });
+      if (panelEl.classList.contains('open')) panelEl.scrollTop = 0;
+      return;
+    }
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'a' || ev.key === 'A')) {
+      ev.preventDefault();
+      selectAll();
+    } else if (ev.key === 'Escape') {
+      if (panelEl.classList.contains('open')) closeSheet();
+      else if (pickCount()) clearPicks();
+    } else if (ev.key === 'Enter' && selKey && entries[selKey] && isImage(entries[selKey].it) && !(t && t.tagName === 'BUTTON')) {
+      ev.preventDefault();
+      openLb(entries[selKey].it);
+    }
   });
 
   /* ── 업로드 중 막대 ── */
@@ -1691,67 +1720,279 @@ var StashCrypto = (function () {
     return hint;
   }
 
-  /** 위 막대 오른쪽 다운로드 — 전체 선택 · 선택 ZIP · 전체 ZIP (+ 진행 상태 줄) */
+  /** 위 막대 오른쪽 — 전체 ZIP(+ 넓은 화면은 여러 장 고르는 법 한 줄) */
   function buildDlBar() {
     var bar = el('div', 'dlbar');
-    var allLabel = el('label');
-    var all = el('input');
-    all.type = 'checkbox';
-    all.id = 'pickAll';
-    allLabel.appendChild(all);
-    allLabel.appendChild(document.createTextNode('전체 선택'));
-    // 목록은 업로드 중·실시간 공유에서 바뀌므로 누를 때의 share.order를 쓴다
-    all.onchange = function () {
-      share.order.forEach(function (it) { if (all.checked) picked[it._k] = true; else delete picked[it._k]; });
-      syncPicks();
-    };
-    var selBtn = el('button', 'btn', '선택 ZIP');
-    selBtn.type = 'button';
-    selBtn.id = 'zipSel';
-    selBtn.disabled = true;
-    selBtn.onclick = function () {
-      makeZip(share.order.filter(function (it) { return picked[it._k]; }), false);
-    };
+    if (!IS_MOBILE) bar.appendChild(el('span', 'tip', 'Ctrl·Shift+클릭이나 빈 곳을 끌어 여러 장 고르기'));
     var allBtn = el('button', 'btn primary', '전체 ZIP');
     allBtn.type = 'button';
     allBtn.id = 'zipAll';
     allBtn.onclick = function () { makeZip(share.order.slice(), true); };
-    var st = el('div', 'dlstatus');
-    st.id = 'dlstatus';
-    bar.appendChild(allLabel);
-    bar.appendChild(selBtn);
     bar.appendChild(allBtn);
-    bar.appendChild(st);
     return bar;
   }
 
+  /** 아래에 떠 있는 것들 — 여러 장 골랐을 때 막대(N개 선택 · 선택 ZIP · 전체 선택 · 선택 해제)와 받기 진행 알림 */
+  function buildFloating() {
+    var frag = document.createDocumentFragment();
+    var sb = el('div', 'selbar');
+    sb.id = 'selbar';
+    sb.hidden = true;
+    sb.appendChild(el('span', 'cnt'));
+    if (share.allowDownload) {
+      var z = el('button', 'btn primary small', '선택 ZIP');
+      z.type = 'button';
+      z.id = 'zipSel';
+      z.onclick = function () { makeZip(share.order.filter(function (it) { return picked[it._k]; }), false); };
+      sb.appendChild(z);
+    }
+    var a = el('button', 'btn small', '전체 선택');
+    a.type = 'button';
+    a.onclick = selectAll;
+    sb.appendChild(a);
+    var c = el('button', 'btn small', '선택 해제');
+    c.type = 'button';
+    c.onclick = clearPicks;
+    sb.appendChild(c);
+    frag.appendChild(sb);
+    if (share.allowDownload) {
+      var st = el('div', 'dlstatus');
+      st.id = 'dlstatus';
+      frag.appendChild(st);
+    }
+    return frag;
+  }
+
+  /** 선택(파란 테두리)·선택 막대·선택 ZIP 버튼·상세 위 'N개 선택' 줄을 picked에 맞춘다 */
   function syncPicks() {
     var count = 0;
     Object.keys(entries).forEach(function (k) {
       var e = entries[k];
       var on = !!picked[k];
       if (on) count++;
-      if (e.cell) {
-        e.cell.classList.toggle('picked', on);
-        if (e.cb) e.cb.checked = on;
-      }
+      if (e.cell) e.cell.classList.toggle('sel', on);
     });
-    groups.forEach(function (g) {
-      if (g.cb) g.cb.checked = g.entries.length > 0 && g.entries.every(function (e) { return picked[e.key]; });
-    });
-    var sel = document.getElementById('zipSel');
-    if (sel) {
-      sel.textContent = count ? '선택 ZIP (' + count + ')' : '선택 ZIP';
-      sel.disabled = busy || !count;
+    var sb = document.getElementById('selbar');
+    if (sb) {
+      // 넓은 화면은 2장 이상일 때만(한 장은 오른쪽 상세에서 받으면 됨), 폰은 길게 눌러 고르기 시작하면 1장부터
+      sb.hidden = !(count >= 2 || (count >= 1 && lastPointer === 'touch'));
+      var c = sb.querySelector('.cnt');
+      if (c) c.textContent = count + '개 선택';
     }
-    var all = document.getElementById('pickAll');
-    if (all) all.checked = count > 0 && count === share.items.length;
+    var sel = document.getElementById('zipSel');
+    if (sel) sel.disabled = busy || !count;
+    var pm = panelEl && panelEl.querySelector('.pmulti');
+    if (pm) {
+      pm.hidden = count < 2;
+      pm.textContent = count + '개 선택됨' + (share.allowDownload ? ' — 아래 "선택 ZIP"으로 한 번에 받기' : '');
+    }
   }
 
   /** 그 항목을 고르고 카드가 보이게 */
   function scrollToItem(it) {
     var k = it._k || itemKey(it);
     if (entries[k]) selectItem(k, { scroll: true });
+  }
+
+  /* ── 고르기 — Stash 앱처럼: 클릭 = 그것만 · Ctrl(⌘)+클릭 = 넣고 빼기 · Shift+클릭 = 이어서 범위 · 빈 곳 끌기 = 박스 선택 ·
+   *    Ctrl+A = 전체 · Esc = 해제 · ←/→/↑/↓ = 옮기기(Shift = 범위). 폰은 길게 눌러 고르기 시작, 그다음 누르면 넣고 빼기.
+   *    picked = 고른 것(ZIP 대상), selKey = 오른쪽 상세에 보이는 것, anchorKey = Shift 범위의 시작 ── */
+
+  var anchorKey = null;
+  var lastPointer = 'mouse';
+  var suppressClick = false;
+  document.addEventListener('pointerdown', function (ev) { lastPointer = ev.pointerType || 'mouse'; }, true);
+
+  function pickCount() { return Object.keys(picked).length; }
+
+  function togglePick(key) {
+    if (picked[key]) delete picked[key]; else picked[key] = true;
+    anchorKey = key;
+    syncPicks();
+  }
+
+  function pickOnly(key) {
+    picked = {};
+    picked[key] = true;
+    anchorKey = key;
+    syncPicks();
+  }
+
+  function selectRange(fromKey, toKey, add) {
+    var order = share.order, ia = -1, ib = -1;
+    for (var i = 0; i < order.length; i++) {
+      if (order[i]._k === fromKey) ia = i;
+      if (order[i]._k === toKey) ib = i;
+    }
+    if (ib < 0) return;
+    if (ia < 0) ia = ib;
+    if (!add) picked = {};
+    for (var j = Math.min(ia, ib); j <= Math.max(ia, ib); j++) picked[order[j]._k] = true;
+    syncPicks();
+  }
+
+  function selectAll() {
+    picked = {};
+    share.order.forEach(function (it) { picked[it._k] = true; });
+    syncPicks();
+  }
+
+  function clearPicks() {
+    picked = {};
+    syncPicks();
+  }
+
+  function onCardClick(e, ev) {
+    if (suppressClick) { suppressClick = false; return; }   // 길게 누른 직후 따라오는 클릭
+    if (lastPointer === 'touch') {
+      // 폰: 그냥 누르면 상세만 연다(고르지 않음) — 고르기는 길게 눌러 시작, 고르는 중엔 누르면 넣고 빼기
+      if (pickCount()) {
+        togglePick(e.key);
+        selectItem(e.key, {});
+      } else {
+        selectItem(e.key, { open: true });
+      }
+      return;
+    }
+    var multi = ev.ctrlKey || ev.metaKey;
+    if (ev.shiftKey) {
+      selectRange(anchorKey && entries[anchorKey] ? anchorKey : (selKey || e.key), e.key, multi);
+      selectItem(e.key, {});
+      return;
+    }
+    if (multi) {
+      togglePick(e.key);
+      selectItem(e.key, {});
+      return;
+    }
+    pickOnly(e.key);
+    selectItem(e.key, { open: true });
+  }
+
+  /** 폰: 길게 누르면 고르기 시작(진동) — 브라우저 길게 누르기 메뉴 대신 */
+  function attachLongPress(card, e) {
+    var t = null, sx = 0, sy = 0;
+    card.addEventListener('touchstart', function (ev) {
+      if (ev.touches.length !== 1) return;
+      sx = ev.touches[0].clientX;
+      sy = ev.touches[0].clientY;
+      clearTimeout(t);
+      t = setTimeout(function () {
+        t = null;
+        suppressClick = true;
+        setTimeout(function () { suppressClick = false; }, 700);
+        lastPointer = 'touch';
+        togglePick(e.key);
+        selectItem(e.key, {});
+        try { if (navigator.vibrate) navigator.vibrate(12); } catch (x) { /* 무시 */ }
+      }, 450);
+    }, { passive: true });
+    card.addEventListener('touchmove', function (ev) {
+      if (t && (Math.abs(ev.touches[0].clientX - sx) > 10 || Math.abs(ev.touches[0].clientY - sy) > 10)) { clearTimeout(t); t = null; }
+    }, { passive: true });
+    card.addEventListener('touchend', function () { clearTimeout(t); t = null; }, { passive: true });
+    card.addEventListener('touchcancel', function () { clearTimeout(t); t = null; }, { passive: true });
+    card.addEventListener('contextmenu', function (ev) { if (lastPointer === 'touch') ev.preventDefault(); });
+  }
+
+  /** 빈 곳을 끌어 박스 선택(마우스) — 박스에 걸친 카드를 고른다. Ctrl·Shift면 이미 고른 것에 더한다.
+   *  가장자리로 끌면 화면이 따라 스크롤된다. 그냥 빈 곳 클릭 = 선택 해제(앱과 같음). */
+  function initRubber(gal) {
+    gal.addEventListener('mousedown', function (ev) {
+      if (ev.button !== 0 || (ev.target.closest && ev.target.closest('.card'))) return;
+      ev.preventDefault();
+      var add = ev.ctrlKey || ev.metaKey || ev.shiftKey;
+      var base = {};
+      if (add) Object.keys(picked).forEach(function (k) { base[k] = true; });
+      else clearPicks();
+      var sx = ev.pageX, sy = ev.pageY, cx = ev.clientX, cy = ev.clientY;
+      var box = null, raf = 0, scrollRaf = 0;
+      var rects = null;   // 카드 위치(문서 기준) — 처음 한 번 잰다(스크롤해도 문서 기준이라 그대로)
+      var update = function () {
+        raf = 0;
+        var px = cx + window.scrollX, py = cy + window.scrollY;
+        var x1 = Math.min(sx, px), y1 = Math.min(sy, py), x2 = Math.max(sx, px), y2 = Math.max(sy, py);
+        if (!box) {
+          if (Math.abs(px - sx) + Math.abs(py - sy) < 5) return;
+          box = el('div', 'rubber');
+          document.body.appendChild(box);
+          rects = Object.keys(entries).map(function (k) {
+            var c = entries[k].cell;
+            if (!c) return null;
+            var r = c.getBoundingClientRect();
+            return { k: k, l: r.left + window.scrollX, t: r.top + window.scrollY, r: r.right + window.scrollX, b: r.bottom + window.scrollY };
+          }).filter(Boolean);
+        }
+        box.style.left = x1 + 'px';
+        box.style.top = y1 + 'px';
+        box.style.width = (x2 - x1) + 'px';
+        box.style.height = (y2 - y1) + 'px';
+        var next = {};
+        Object.keys(base).forEach(function (k) { next[k] = true; });
+        rects.forEach(function (q) { if (q.l < x2 && q.r > x1 && q.t < y2 && q.b > y1) next[q.k] = true; });
+        picked = next;
+        syncPicks();
+      };
+      var edgeScroll = function () {
+        scrollRaf = 0;
+        if (!box) return;
+        var dy = cy < 40 ? -14 : (cy > window.innerHeight - 40 ? 14 : 0);
+        if (dy) {
+          window.scrollBy(0, dy);
+          if (!raf) raf = requestAnimationFrame(update);
+          scrollRaf = requestAnimationFrame(edgeScroll);
+        }
+      };
+      var move = function (e2) {
+        cx = e2.clientX;
+        cy = e2.clientY;
+        if (!raf) raf = requestAnimationFrame(update);
+        if (!scrollRaf) scrollRaf = requestAnimationFrame(edgeScroll);
+      };
+      var up = function () {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (raf) cancelAnimationFrame(raf);
+        if (scrollRaf) cancelAnimationFrame(scrollRaf);
+        if (box) {
+          box.remove();
+          var last = null;   // 고른 것 중 화면 순서상 마지막을 상세로
+          share.order.forEach(function (it) { if (picked[it._k]) last = it._k; });
+          if (last) selectItem(last, {});
+        }
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
+
+  /** 위·아래 이웃 카드(마소너리라 번호 순이 아니라 화면 위치로) */
+  function verticalNeighbor(dir) {
+    var cur = selKey && entries[selKey];
+    if (!cur || !cur.cell) return null;
+    var r = cur.cell.getBoundingClientRect();
+    var mid = (r.left + r.right) / 2;
+    var best = null, bestD = Infinity;
+    Object.keys(entries).forEach(function (k) {
+      var c = entries[k].cell;
+      if (!c || k === selKey) return;
+      var q = c.getBoundingClientRect();
+      if (dir > 0 ? q.top < r.bottom - 2 : q.bottom > r.top + 2) return;
+      var dx = q.left > mid ? q.left - mid : (q.right < mid ? mid - q.right : 0);
+      var dy = dir > 0 ? q.top - r.bottom : r.top - q.bottom;
+      var d = dy + dx * 3;
+      if (d < bestD) { bestD = d; best = k; }
+    });
+    return best;
+  }
+
+  /** 화면 순서로 d칸 옆 항목 키 */
+  function orderNeighbor(d) {
+    var order = share.order, i = -1;
+    if (!order.length) return null;
+    for (var j = 0; j < order.length; j++) if (order[j]._k === selKey) { i = j; break; }
+    var t = i < 0 ? 0 : Math.max(0, Math.min(order.length - 1, i + d));
+    return order[t]._k;
   }
 
   /** 카드 — 앱 갤러리 카드처럼: 사진(비율대로) + 번호 + 아래 이름·크기. 누르면 상세, 두 번 누르면 크게 */
@@ -1783,22 +2024,6 @@ var StashCrypto = (function () {
     e.numEl = el('span', 'num', pad(it.n));
     ib.appendChild(e.numEl);
 
-    var cb = null;
-    if (share.allowDownload) {
-      var pick = el('label', 'pick');
-      cb = el('input');
-      cb.type = 'checkbox';
-      cb.checked = !!picked[e.key];
-      cb.setAttribute('aria-label', pad(it.n) + '번 선택');
-      pick.appendChild(cb);
-      pick.onclick = function (ev) { ev.stopPropagation(); };
-      pick.ondblclick = function (ev) { ev.stopPropagation(); };
-      cb.onchange = function () {
-        if (cb.checked) picked[e.key] = true; else delete picked[e.key];
-        syncPicks();
-      };
-      ib.appendChild(pick);
-    }
     card.appendChild(ib);
 
     if (isImage(it)) {
@@ -1809,22 +2034,16 @@ var StashCrypto = (function () {
       lbl.appendChild(e.dmEl);
       card.appendChild(lbl);
     }
-    if (picked[e.key]) card.classList.add('picked');
-    if (selKey === e.key) card.classList.add('sel');
+    if (picked[e.key]) card.classList.add('sel');
+    if (selKey === e.key) card.classList.add('cur');
     e.cell = card;
     e.ib = ib;
-    e.cb = cb;
     sizeCard(e);
 
-    card.onclick = function () { selectItem(e.key, { open: true }); };
-    card.ondblclick = function () { if (isImage(e.it) && !narrow()) openLb(e.it); };
-    card.onkeydown = function (ev) {
-      if (ev.key === 'Enter' || ev.key === ' ') {
-        ev.preventDefault();
-        if (selKey === e.key && isImage(e.it) && !narrow()) openLb(e.it);
-        else selectItem(e.key, { open: true });
-      }
-    };
+    card.addEventListener('mousedown', function (ev) { if (ev.shiftKey || ev.ctrlKey || ev.metaKey) ev.preventDefault(); });   // 글자 선택 막기
+    card.onclick = function (ev) { onCardClick(e, ev); };
+    card.ondblclick = function () { if (isImage(e.it)) openLb(e.it); };
+    attachLongPress(card, e);
     return card;
   }
 
@@ -2430,7 +2649,17 @@ var StashCrypto = (function () {
         prevUrl = null;
         setTimeout(function () { try { URL.revokeObjectURL(u); } catch (e) { /* 무시 */ } }, 10 * 60 * 1000);
       }
-      if (!stale()) setBusy(false);
+      if (stale()) return;
+      setBusy(false);
+      // 끝난 알림은 아래에 떠 있으니 닫을 수 있게
+      var st = document.getElementById('dlstatus');
+      if (st && st.firstChild) {
+        var x = el('button', 'x', '✕');
+        x.type = 'button';
+        x.setAttribute('aria-label', '알림 닫기');
+        x.onclick = function () { setStatus(null); };
+        st.insertBefore(x, st.firstChild);
+      }
     };
 
     var runPart = function (k) {
