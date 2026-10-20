@@ -7,9 +7,17 @@
 <!-- Stash 공유 뷰어 (정적 페이지). 데이터는 Drive의 공개 매니페스트(m.json, v2) 또는 Apps Script API(옛 링크)에서 받는다 — 이 파일에는 공유 내용이 없다. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src https: data: blob:; connect-src https://script.google.com https://*.googleusercontent.com https://drive.usercontent.google.com https://www.googleapis.com; base-uri 'none'; form-action 'none'">
 <title>Stash 공유</title>
-<meta property="og:title" content="Stash 공유">
-<meta property="og:description" content="받은 링크로 사진과 메모를 봅니다.">
+<!-- 카톡·메신저 링크 미리보기(이 페이지의 제목·설명·대표 이미지를 읽어 카드로 보여 줌). 이미지 = share-viewer/og.png -->
+<meta name="description" content="보내준 사진과 메모를 모아 봅니다.">
+<meta property="og:site_name" content="Stash">
+<meta property="og:title" content="Stash 공유 — 사진과 메모">
+<meta property="og:description" content="보내준 사진과 메모를 모아 봅니다. 눌러서 보기">
 <meta property="og:type" content="website">
+<meta property="og:image" content="https://stash-link.web.app/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Stash 공유">
+<meta name="twitter:card" content="summary_large_image">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous" referrerpolicy="no-referrer" defer></script>
 <style>
   /* Stash 앱(PC) 화면과 같은 색·카드 — app/main_window.py APP_DARK_STYLE · app/gallery.py 카드 */
